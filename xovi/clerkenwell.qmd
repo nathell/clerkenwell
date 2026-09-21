@@ -1,0 +1,232 @@
+; Clerkenwell device adapter.
+;
+; Implements the insertion handshake of investigation 3 (docs/investigations.md):
+;
+;     GET /command  -> the pending command for THIS doc+page, or empty
+;     GET /attempt  -> host durably records an attempt; 200 authorizes the call
+;     insertImageFileAsSceneItem(...)
+;     GET /ack      -> report inserted | failed
+;
+; The ordering is the contract. The host persists the attempt BEFORE replying
+; 200, and the adapter refuses to insert without that 200. A crash between the
+; attempt and the ack therefore leaves an `uncertain` result that the host must
+; reconcile by inspection -- never by automatic replay. That is the spec's model
+; and it is deliberately not an exactly-once claim.
+;
+; Guards, in the order the spec requires them:
+;   - one outstanding command at a time (inFlight), so the 1s poll cannot start
+;     a second cycle while XHR callbacks are still pending
+;   - identity is rechecked immediately before the insertion call, not merely
+;     when the command was loaded, so a page turn mid-handshake aborts
+;   - the command is validated (protocol version, required fields, finite
+;     coordinates) before anything is recorded
+;   - unsupported viewport states (zoom, non-notepage, page error) are skipped
+;
+; Host side: bb tools/insert-harness.clj  (see its --help)
+; Tunnel:    ssh -R 127.0.0.1:14242:127.0.0.1:14242 <rm-host-alias>
+;
+; This file is unhashed. Distribution builds are hashed with qmldiff against
+; hashtab for firmware 3.27.1.0.
+;
+; Compatible with: firmware 3.27.1.0 (snorlax).
+
+VERSION 3.27.1.0
+
+AFFECT [[11806562588218124596]]
+    TRAVERSE [[8397993708429497603]]
+        LOCATE AFTER ALL
+        INSERT {
+            ~&214604601930&~ {
+                ~&5972374&~: ckwTimer
+                ~&7713147298280334&~: 1000
+                ~&233743626668842&~: ~&6504254477&~.~&8399340108982949229&~ !== ~&6504117156&~ && ~&6504254477&~.~&7712934851008712&~ !== ~&6504117156&~
+                ~&7083121289162&~: ~&6504329801&~
+
+                property ~&7083178290016&~ ~&6503664356&~: "http://127.0.0.1:14242"
+                property ~&7083178290016&~ instanceId: ""
+                property ~&6503679477&~ inFlight: ~&214625660372&~
+
+                ~&254480451320573660&~.~&495334332051582499&~: {
+                    /* Freshness token: lets the host tell a live adapter from a*/
+                    /* stale report left by a previous UI process.*/
+                    ckwTimer.instanceId = "ckw-" + ~&6502586279&~.now() + ~&"180918&~ +
+                                          ~&6502909715&~.~&214626058827&~(~&6502909715&~.random() * 1000000);
+                    ~&233724020023100&~.~&197092075&~("CKW adapter instance " + ckwTimer.instanceId);
+                }
+
+                function ckwGet(~&6504167510&~, cb) {
+                    ~&197102514&~ xhr =  new  XMLHttpRequest();
+                    xhr.onreadystatechange = function() {
+                        ~&5972376&~ (xhr.readyState !== XMLHttpRequest.DONE) ~&7083121450889&~;
+                        cb(xhr.~&7083177691309&~ === 200, xhr.responseText);
+                    };
+                    try {
+                        xhr.~&6504147419&~("GET", ckwTimer.~&6503664356&~ + ~&6504167510&~);
+                        xhr.~&6504279475&~();
+                    } catch (err) {
+                        cb(~&214625660372&~, "" + err);
+                    }
+                }
+
+                function ckwAck(~&5972374&~, ~&7083177691309&~, ~&7082573533308&~, ~&6503751311&~) {
+                    ckwGet("/ack?instance=" + encodeURIComponent(ckwTimer.instanceId) +
+                           "&id=" + encodeURIComponent(~&5972374&~) +
+                           "&status=" + encodeURIComponent(~&7083177691309&~) +
+                           "&detail=" + encodeURIComponent(~&7082573533308&~ || ""),
+                           function(~&5972579&~, ~&6503679127&~) { ~&6503751311&~(); });
+                }
+
+                /* A command is only usable if every field we rely on is present*/
+                /* and sane. Returns an error string, or "" when valid.*/
+                function ckwValidate(~&180972&~) {
+                    ~&5972376&~ (!~&180972&~) ~&7083121450889&~ "empty";
+                    ~&5972376&~ (~&180972&~.protocol !== 1) ~&7083121450889&~ "protocol=" + ~&180972&~.protocol;
+                    ~&5972376&~ (!~&180972&~.resultId) ~&7083121450889&~ "no resultId";
+                    ~&5972376&~ (!~&180972&~.~&6504167510&~) ~&7083121450889&~ "no path";
+                    ~&5972376&~ (!~&180972&~.doc || !~&180972&~.~&6504167078&~) ~&7083121450889&~ "no target identity";
+                    ~&5972376&~ (!isFinite(~&180972&~.~&180993&~) || !isFinite(~&180972&~.~&180994&~)) ~&7083121450889&~ "non-finite coords";
+                    ~&5972376&~ (!isFinite(~&180972&~.~&180992&~) || !isFinite(~&180972&~.~&180977&~) || ~&180972&~.~&180992&~ <= 0 || ~&180972&~.~&180977&~ <= 0)
+                        ~&7083121450889&~ "bad dimensions";
+                    ~&5972376&~ (!isFinite(~&180972&~.bytes) || ~&180972&~.bytes <= 0) ~&7083121450889&~ "no asset size";
+                    ~&7083121450889&~ "";
+                }
+
+                /* insertImageFileAsSceneItem does NOT throw when the file is*/
+                /* missing -- it silently does nothing and the call returns*/
+                /* normally. So the asset must be proven present and complete*/
+                /* BEFORE an attempt is recorded, or the handshake will happily*/
+                /* acknowledge a no-op. Verified on device 2026-09-18.*/
+                function ckwCheckAsset(~&6504167510&~, wantBytes, cb) {
+                    ~&197102514&~ xhr =  new  XMLHttpRequest();
+                    xhr.onreadystatechange = function() {
+                        ~&5972376&~ (xhr.readyState !== XMLHttpRequest.DONE) ~&7083121450889&~;
+                        ~&5972376&~ (xhr.~&7083177691309&~ !== 200 && xhr.~&7083177691309&~ !== 0) {
+                            cb(~&214625660372&~, "status=" + xhr.~&7083177691309&~);
+                            ~&7083121450889&~;
+                        }
+                        ~&197102514&~ got = -1;
+                        ~&5972376&~ (xhr.~&7713519214849208&~ && xhr.~&7713519214849208&~.byteLength !== ~&254550717068498203&~)
+                            got = xhr.~&7713519214849208&~.byteLength;
+                        ~&6503784146&~ ~&5972376&~ (xhr.responseText)
+                            got = xhr.responseText.~&7082886407723&~;
+                        ~&5972376&~ (got <= 0) { cb(~&214625660372&~, "missing or empty"); ~&7083121450889&~; }
+                        ~&5972376&~ (got !== wantBytes) {
+                            cb(~&214625660372&~, "size " + got + " != " + wantBytes);
+                            ~&7083121450889&~;
+                        }
+                        cb(~&6504329801&~, "");
+                    };
+                    try {
+                        xhr.~&6504147419&~("GET", ~&"233727656679905&~ + ~&6504167510&~);
+                        xhr.responseType = "arraybuffer";
+                        xhr.~&6504279475&~();
+                    } catch (ae) {
+                        cb(~&214625660372&~, "" + ae);
+                    }
+                }
+
+                ~&495358363329399331&~: {
+                    ~&5972376&~ (ckwTimer.inFlight) ~&7083121450889&~;
+                    ~&5972376&~ (!~&6504254477&~.~&8399340108982949229&~ || !~&6504254477&~.~&7712934851008712&~) ~&7083121450889&~;
+
+                    /* Unsupported viewport states are skipped, not guessed at.*/
+                    ~&5972376&~ (!~&6504254477&~.~&7712934851008712&~.~&8399622833342862200&~(~&6504254477&~.~&6504167078&~)) ~&7083121450889&~;
+                    ~&5972376&~ (~&6504254477&~.~&7713872916601742&~ || ~&6504254477&~.~&254557806247864367&~ || ~&6504254477&~.~&254543134821244944&~) ~&7083121450889&~;
+
+                    ~&197102514&~ doc = ~&6504254477&~.~&7712934851008712&~.~&5972374&~;
+                    ~&197102514&~ ~&6504167078&~ = ~&6504254477&~.~&7083037950451&~;
+                    ~&5972376&~ (!doc || !~&6504167078&~) ~&7083121450889&~;
+
+                    ckwTimer.inFlight = ~&6504329801&~;
+
+                    ckwGet("/command?instance=" + encodeURIComponent(ckwTimer.instanceId) +
+                           "&doc=" + encodeURIComponent(doc) +
+                           "&page=" + encodeURIComponent(~&6504167078&~),
+                    function(~&5972579&~, ~&6503679127&~) {
+                        ~&5972376&~ (!~&5972579&~ || !~&6503679127&~ || ~&6503679127&~.~&7082886407723&~ === 0) {
+                            ckwTimer.inFlight = ~&214625660372&~;
+                            ~&7083121450889&~;
+                        }
+                        ~&197102514&~ cmd = ~&6504117156&~;
+                        try {
+                            cmd = ~&6502785411&~.parse(~&6503679127&~);
+                        } catch (pe) {
+                            ~&233724020023100&~.~&197092075&~("CKW bad command JSON: " + pe);
+                            ckwTimer.inFlight = ~&214625660372&~;
+                            ~&7083121450889&~;
+                        }
+                        ~&5972376&~ (!cmd || !cmd.resultId) {   /* host said "nothing pending"*/
+                            ckwTimer.inFlight = ~&214625660372&~;
+                            ~&7083121450889&~;
+                        }
+                        ~&197102514&~ bad = ckwTimer.ckwValidate(cmd);
+                        ~&5972376&~ (bad !== "") {
+                            ~&233724020023100&~.~&197092075&~("CKW rejecting command: " + bad);
+                            ckwTimer.ckwAck(cmd.resultId || "?", ~&"7713518849160367&~, bad,
+                                            function() { ckwTimer.inFlight = ~&214625660372&~; });
+                            ~&7083121450889&~;
+                        }
+
+                        /* Prove the asset is present and complete before we*/
+                        /* record an attempt against it.*/
+                        ckwTimer.ckwCheckAsset(cmd.~&6504167510&~, cmd.bytes, function(present, why) {
+                        ~&5972376&~ (!present) {
+                            ~&233724020023100&~.~&197092075&~("CKW asset unusable (" + why + "): " + cmd.~&6504167510&~);
+                            ckwTimer.ckwAck(cmd.resultId, ~&"7713518849160367&~, "asset " + why,
+                                            function() { ckwTimer.inFlight = ~&214625660372&~; });
+                            ~&7083121450889&~;
+                        }
+
+                        /* Durable attempt BEFORE authorizing the call. No 200,*/
+                        /* no insertion.*/
+                        ckwTimer.ckwGet("/attempt?instance=" + encodeURIComponent(ckwTimer.instanceId) +
+                                        "&id=" + encodeURIComponent(cmd.resultId) +
+                                        "&doc=" + encodeURIComponent(cmd.doc) +
+                                        "&page=" + encodeURIComponent(cmd.~&6504167078&~),
+                        function(ok2, body2) {
+                            ~&5972376&~ (!ok2) {
+                                ~&233724020023100&~.~&197092075&~("CKW attempt not recorded; not inserting");
+                                ckwTimer.inFlight = ~&214625660372&~;
+                                ~&7083121450889&~;
+                            }
+
+                            /* Recheck identity AT the call, not when loaded.*/
+                            ~&5972376&~ (!~&6504254477&~.~&8399340108982949229&~ || !~&6504254477&~.~&7712934851008712&~) {
+                                ckwTimer.ckwAck(cmd.resultId, "aborted", "view gone",
+                                                function() { ckwTimer.inFlight = ~&214625660372&~; });
+                                ~&7083121450889&~;
+                            }
+                            ~&5972376&~ (~&6504254477&~.~&7712934851008712&~.~&5972374&~ !== cmd.doc || ~&6504254477&~.~&7083037950451&~ !== cmd.~&6504167078&~) {
+                                ckwTimer.ckwAck(cmd.resultId, "aborted",
+                                                "identity changed: doc=" + ~&6504254477&~.~&7712934851008712&~.~&5972374&~ +
+                                                " page=" + ~&6504254477&~.~&7083037950451&~,
+                                                function() { ckwTimer.inFlight = ~&214625660372&~; });
+                                ~&7083121450889&~;
+                            }
+
+                            try {
+                                ~&6504254477&~.~&8399340108982949229&~.insertImageFileAsSceneItem(
+                                    ~&"233727656679905&~ + cmd.~&6504167510&~,
+                                    ~&5971598&~.~&214638019283&~(cmd.~&180993&~, cmd.~&180994&~)
+                                );
+                                ~&233724020023100&~.~&197092075&~("CKW inserted " + cmd.resultId +
+                                            " at " + cmd.~&180993&~ + ~&"180917&~ + cmd.~&180994&~);
+                                ckwTimer.ckwAck(cmd.resultId, "inserted", "",
+                                                function() { ckwTimer.inFlight = ~&214625660372&~; });
+                            } catch (ie) {
+                                /* A synchronous throw proves the call did not take*/
+                                /* effect, so this is a definite failure. Anything*/
+                                /* asynchronous is invisible to us and stays*/
+                                /* uncertain on the host side.*/
+                                ~&233724020023100&~.~&197092075&~("CKW insert threw: " + ie);
+                                ckwTimer.ckwAck(cmd.resultId, ~&"7082646676942&~, "" + ie,
+                                                function() { ckwTimer.inFlight = ~&214625660372&~; });
+                            }
+                        });
+                        });
+                    });
+                }
+            }
+        }
+    END TRAVERSE
+END AFFECT
