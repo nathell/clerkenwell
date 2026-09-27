@@ -227,5 +227,29 @@ keywords, so the rendering tests passed while nothing rendered at all."
     (let ((clerkenwell-ssh-user "root"))
       (should (equal (clerkenwell--ssh-destination) "root@rm")))))
 
+(ert-deftest clerkenwell-test-image-width-follows-scale ()
+  "Images are sized in page units, whatever resolution they were drawn at."
+  (let ((clerkenwell-image-scale 0.5))
+    (should (= 300 (clerkenwell--image-width 600 10000))))
+  (let ((clerkenwell-image-scale 1.0))
+    (should (= 600 (clerkenwell--image-width 600 10000)))))
+
+(ert-deftest clerkenwell-test-image-width-never-exceeds-window ()
+  "An image wider than the window is shrunk to fit it."
+  (let ((clerkenwell-image-scale 1.0))
+    (should (= 800 (clerkenwell--image-width 1404 800)))
+    ;; Never a degenerate width.
+    (should (= 1 (clerkenwell--image-width 1404 0)))))
+
+(ert-deftest clerkenwell-test-rebuild-preserves-point-in-history ()
+  "Reading back through the history must survive a refresh or a resize."
+  (clerkenwell-test--with-buffer
+   (clerkenwell--rebuild-history clerkenwell-test--entries)
+   (goto-char (point-min))
+   (search-forward "(+ 1 2)")
+   (let ((pos (point)))
+     (clerkenwell--rebuild-history clerkenwell-test--entries)
+     (should (= pos (point))))))
+
 (provide 'clerkenwell-test)
 ;;; clerkenwell-test.el ends here

@@ -95,11 +95,28 @@ follow the editor's theme rather than the page's.  Either the symbol
       (cons (if (and (stringp fg) (string-prefix-p "#" fg)) fg "black")
             (if (and (stringp bg) (string-prefix-p "#" bg)) bg "white")))))
 
-(defcustom clerkenwell-image-scale 0.5
-  "Scale factor for handwriting images in the buffer.
-Strokes are rendered at page resolution, so a page-wide scribble is
-around 800 pixels across; halving it keeps the history readable."
+(defcustom clerkenwell-image-scale 0.8
+  "Size of handwriting in the buffer, in screen pixels per page unit.
+The page is 1404 units wide, so at 0.8 a page-wide scribble is about
+1120 pixels across.  An image wider than the window is shrunk to fit it,
+whatever this says.  Takes effect on the next refresh."
   :type 'number)
+
+(defcustom clerkenwell-ink-resolution 2
+  "Image pixels per page unit that handwriting is drawn at.
+Higher is sharper when `clerkenwell-image-scale' enlarges the images, or
+on a high-density display, at the cost of larger files.  The size an
+image is shown at does not depend on this.  Run `clerkenwell-redraw'
+after changing it, so existing entries are redrawn too."
+  :type 'number)
+
+(defun clerkenwell--render-opts ()
+  "The handwriting rendering options, as a Clojure map literal."
+  (let ((colors (clerkenwell--ink-colors)))
+    (format "{:stroke-color %s :background %s :resolution %s}"
+            (clerkenwell--clj-string (car colors))
+            (clerkenwell--clj-string (cdr colors))
+            (number-to-string clerkenwell-ink-resolution))))
 
 (defcustom clerkenwell-show-images t
   "Whether to render handwriting entries as images.
@@ -130,6 +147,12 @@ over a slow connection or in a terminal frame."
 
 (defvar-local clerkenwell--history-version nil
   "Last history version seen, so unchanged history is not refetched.")
+
+(defvar-local clerkenwell--entries nil
+  "The history entries last rendered, so a resize can redraw without refetching.")
+
+(defvar-local clerkenwell--rendered-width nil
+  "The width images were last fitted to, in pixels.")
 
 (defcustom clerkenwell-poll-interval 3
   "Seconds between checks for new handwriting.
@@ -237,6 +260,20 @@ leading colon, so comparing against a plain name silently never matches."
 (defun clerkenwell--draft-start ()
   (marker-position clerkenwell--history-end))
 
+(defun clerkenwell--available-width ()
+  "Pixels an image may occupy: the narrowest window showing this buffer.
+A little is kept back so an image never quite fills the line, which would
+make Emacs wrap it."
+  (let ((ws (get-buffer-window-list (current-buffer) nil t)))
+    (- (if ws
+           (apply #'min (mapcar (lambda (w) (window-body-width w t)) ws))
+         (frame-text-width))
+       (frame-char-width))))
+
+(defun clerkenwell--image-width (page-width available)
+  "Pixels to show an image PAGE-WIDTH page units wide at, within AVAILABLE."
+  (max 1 (min (round (* page-width clerkenwell-image-scale)) available)))
+
 (defun clerkenwell--render-entry (entry)
   "Insert one history ENTRY at point."
   (let ((kind (clerkenwell--get entry :kind)))
@@ -265,8 +302,16 @@ leading colon, so comparing against a plain name silently never matches."
                             'font-lock-comment-face))))
          (if (or problem (not clerkenwell-show-images))
              (insert "\n")
-           (insert-image (create-image asset nil nil
-                                       :scale clerkenwell-image-scale))
+           (let ((pw (clerkenwell--get entry :page-width)))
+             (insert-image
+              (if pw
+                  (create-image asset nil nil
+                                :width (clerkenwell--image-width
+                                        pw (or clerkenwell--rendered-width
+                                               (clerkenwell--available-width))))
+                ;; A session older than this buffer, which does not report
+                ;; sizes: assume the image was drawn at page resolution.
+                (create-image asset nil nil :scale clerkenwell-image-scale))))
            (insert "\n\n"))))
       ("computation"
        (let ((src (clerkenwell--get entry :source))
@@ -297,11 +342,18 @@ leading colon, so comparing against a plain name silently never matches."
   "Replace the history region with ENTRIES, preserving the draft and point.
 Asynchronous updates must not disturb what you are typing, so the draft
 text, point and mark are restored around the rewrite."
+  (setq clerkenwell--entries entries
+        clerkenwell--rendered-width (clerkenwell--available-width))
   (let* ((inhibit-read-only t)
          (draft (or (clerkenwell-draft) ""))
          (point-in-draft (when (and clerkenwell--history-end
                                     (>= (point) (clerkenwell--draft-start)))
-                           (- (point) (clerkenwell--draft-start)))))
+                           (- (point) (clerkenwell--draft-start))))
+         ;; Reading back through the history: stay there. Rewriting keeps
+         ;; earlier text where it was, so the position still means the same.
+         (point-in-history (unless point-in-draft (point)))
+         (starts (mapcar (lambda (w) (cons w (window-start w)))
+                         (get-buffer-window-list (current-buffer) nil t))))
     (save-restriction
       (widen)
       (erase-buffer)
@@ -313,9 +365,26 @@ text, point and mark are restored around the rewrite."
       (clerkenwell--protect (point-min) (point))
       (setq clerkenwell--history-end (copy-marker (point) nil))
       (insert draft))
-    (goto-char (if point-in-draft
-                   (min (point-max) (+ (clerkenwell--draft-start) point-in-draft))
-                 (point-max)))))
+    (goto-char (cond (point-in-draft
+                      (min (point-max) (+ (clerkenwell--draft-start) point-in-draft)))
+                     (point-in-history (min point-in-history (clerkenwell--draft-start)))
+                     (t (point-max))))
+    (dolist (ws starts)
+      (set-window-start (car ws) (min (cdr ws) (point-max)) t))))
+
+(defun clerkenwell--on-resize (_frame-or-window)
+  "Refit images when the space available to them has changed."
+  (let ((buf (current-buffer)))
+    ;; Deferred: this runs during redisplay, which is no place to rewrite
+    ;; the buffer; the timer also coalesces a burst of resize events.
+    (run-at-time 0 nil
+                 (lambda ()
+                   (when (buffer-live-p buf)
+                     (with-current-buffer buf
+                       (when (and clerkenwell--entries
+                                  (not (eql (clerkenwell--available-width)
+                                            clerkenwell--rendered-width)))
+                         (clerkenwell--rebuild-history clerkenwell--entries))))))))
 
 ;;; ------------------------------------------------------------------
 ;;; Commands
@@ -333,14 +402,12 @@ NAMESPACE is the namespace submissions are evaluated in."
       (setq clerkenwell--connection conn
             clerkenwell--namespace namespace)
       (clerkenwell-mode 1)
-      (let* ((colors (clerkenwell--ink-colors))
-             (started (clerkenwell--eval-sync
-                       (format "(do (require 'clerkenwell.session) (clerkenwell.session/start! {:state-root %s :ssh-host %s :port %d :render-opts {:stroke-color %s :background %s}}))"
+      (let* ((started (clerkenwell--eval-sync
+                       (format "(do (require 'clerkenwell.session) (clerkenwell.session/start! {:state-root %s :ssh-host %s :port %d :render-opts %s}))"
                                (clerkenwell--clj-string clerkenwell-state-root)
                                (clerkenwell--clj-string (clerkenwell--ssh-destination))
                                clerkenwell-port
-                               (clerkenwell--clj-string (car colors))
-                               (clerkenwell--clj-string (cdr colors))))))
+                               (clerkenwell--render-opts)))))
         ;; A nil result means the eval itself failed -- most often because
         ;; clerkenwell.session is not on this REPL's classpath. Saying
         ;; "already running" there would hide a real problem.
@@ -499,27 +566,35 @@ it again does nothing."
       (message "Clerkenwell: %s"
                (or (and r (clerkenwell--get r :message)) "could not regroup")))))
 
-(defun clerkenwell-sync-colors ()
-  "Redraw handwriting images in the current theme's colours.
-Existing entries are redrawn from their retained page snapshots, so the
-history does not end up half in one scheme and half in another.  Run this
-after changing theme."
+(defun clerkenwell-redraw ()
+  "Redraw handwriting images with the current colours and resolution.
+Colours follow `clerkenwell-ink-colors', resolution follows
+`clerkenwell-ink-resolution'.  Existing entries are redrawn from their
+retained page snapshots, so the history does not end up half in one
+scheme and half in another.  Run this after changing theme or resolution."
   (interactive)
-  (let* ((colors (clerkenwell--ink-colors))
-         (r (clerkenwell--eval-sync
-             (format "(clerkenwell.session/set-ink-colors! {:stroke-color %s :background %s})"
-                     (clerkenwell--clj-string (car colors))
-                     (clerkenwell--clj-string (cdr colors))))))
-    (if (and r (clerkenwell--get r :ok?))
-        (progn
-          (clear-image-cache)
-          (setq clerkenwell--history-version nil)
-          (clerkenwell-refresh)
-          (message "Clerkenwell: %s on %s, %s entries redrawn"
-                   (car colors) (cdr colors)
-                   (clerkenwell--get r :rerendered 0)))
-      (message "Clerkenwell: %s"
-               (or (and r (clerkenwell--get r :message)) "could not set colours")))))
+  ;; Asynchronous: every entry is redrawn, which at a high resolution easily
+  ;; outlasts a synchronous request's timeout.
+  (let ((colors (clerkenwell--ink-colors))
+        (resolution clerkenwell-ink-resolution))
+    (message "Clerkenwell: redrawing handwriting...")
+    (clerkenwell--eval-async
+     (format "(clerkenwell.session/set-render-opts! %s)" (clerkenwell--render-opts))
+     (lambda (r problem)
+       (if (and r (clerkenwell--get r :ok?))
+           (progn
+             (clear-image-cache)
+             (setq clerkenwell--history-version nil)
+             (clerkenwell-refresh)
+             (message "Clerkenwell: %s on %s at %sx, %s entries redrawn"
+                      (car colors) (cdr colors) resolution
+                      (clerkenwell--get r :rerendered 0)))
+         (message "Clerkenwell: %s"
+                  (or problem
+                      (and r (clerkenwell--get r :message))
+                      "could not redraw")))))))
+
+(define-obsolete-function-alias 'clerkenwell-sync-colors #'clerkenwell-redraw "0.2")
 
 (defun clerkenwell-reset-history ()
   "Archive this notebook's history so the buffer starts fresh.
@@ -611,11 +686,13 @@ else and sends nothing."
       (progn
         (add-hook 'after-change-functions #'clerkenwell--after-change nil t)
         (add-hook 'kill-buffer-hook #'clerkenwell--stop-polling nil t)
+        (add-hook 'window-size-change-functions #'clerkenwell--on-resize nil t)
         (unless clerkenwell--history-end
           (setq clerkenwell--history-end (copy-marker (point-max) nil))))
     (clerkenwell--stop-polling)
     (remove-hook 'after-change-functions #'clerkenwell--after-change t)
-    (remove-hook 'kill-buffer-hook #'clerkenwell--stop-polling t)))
+    (remove-hook 'kill-buffer-hook #'clerkenwell--stop-polling t)
+    (remove-hook 'window-size-change-functions #'clerkenwell--on-resize t)))
 
 (provide 'clerkenwell)
 ;;; clerkenwell.el ends here

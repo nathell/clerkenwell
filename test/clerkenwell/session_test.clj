@@ -151,6 +151,11 @@
       (testing "both kinds appear, in host observation order"
         (is (= [:handwriting :computation] kinds))
         (is (apply < (map :sequence (:entries h)))))
+      (testing "the handwriting entry is sized in page units"
+        (let [bb (lines/bbox (filter lines/ink? (:strokes (lines/parse bs))))]
+          (is (< (Math/abs (- (:width (ink/extent bb)) (:page-width (first (:entries h)))))
+                 0.01)
+              "within float precision: the bbox has been through EDN")))
       (testing "the handwriting entry points at a real rendered asset"
         (let [asset (:asset (first (:entries h)))]
           (is (.isAbsolute (io/file asset))

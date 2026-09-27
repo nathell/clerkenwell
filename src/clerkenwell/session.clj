@@ -302,24 +302,25 @@
       {:ok? false :message "no notebook linked"})
     {:ok? false :message "no session"}))
 
-(defn set-ink-colors!
-  "Set the colours handwriting is drawn in, and redraw what already exists.
+(defn set-render-opts!
+  "Change how handwriting is drawn -- colours, resolution -- and redraw what
+   already exists.
 
    The images are shown in Emacs, never sent to the device, so they follow the
    editor's theme rather than the page's. Existing entries are redrawn from
    their retained snapshots, so the history does not end up half in one scheme
-   and half in another."
-  [{:keys [stroke-color background] :as colors}]
+   and half in another. Options not given keep their current values."
+  [opts]
   (if-let [s @session]
-    (do
-      (swap! session assoc :render-opts colors)
+    (let [merged (merge (:render-opts s) opts)]
+      (swap! session assoc :render-opts merged)
       ;; The running watcher captured the old options; restart it.
       (when-let [id (:notebook-id s)]
         (when-let [stop? (:watcher s)] (reset! stop? true))
         (swap! session assoc :watcher nil :notebook-id nil))
       (let [redrawn (when-let [id (:notebook-id s)]
-                      (ink/rerender! (store/notebook-dir (:state-root s) id) nil colors))]
-        {:ok? true :colors colors :rerendered (count (:rendered redrawn))}))
+                      (ink/rerender! (store/notebook-dir (:state-root s) id) nil merged))]
+        {:ok? true :render-opts merged :rerendered (count (:rendered redrawn))}))
     {:ok? false :message "no session"}))
 
 (defn history-version
@@ -380,6 +381,9 @@
                :page-id (:page-id ev)
                :at (:at ev)
                :strokes (reduce + (map (comp count :stroke-ids) (:events g)))
+               ;; In page units, whatever resolution the image was drawn at:
+               ;; the buffer sizes images from this, not from their pixels.
+               :page-width (:width (ink/extent (:bbox g)))
                ;; Absolute: the state root may be relative to the JVM's
                ;; working directory, which is not where Emacs resolves
                ;; relative names from.

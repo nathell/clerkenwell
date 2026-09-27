@@ -24,10 +24,23 @@
             [clerkenwell.store :as store]))
 
 (def default-opts
+  "Rendering options. :stroke-width and :margin are in page units;
+   :resolution is image pixels per page unit, so an entry can be drawn sharper
+   than the page without changing its proportions."
   {:stroke-color "black"
    :background "white"
    :stroke-width 3
-   :margin 20})
+   :margin 20
+   :resolution 1})
+
+(defn extent
+  "The size of an entry's image in page units: its strokes' bounding box plus
+   the margin. Independent of resolution, so the buffer can size an image the
+   same way however sharply it was drawn."
+  [bbox]
+  (let [m (:margin default-opts)]
+    {:width (+ (- (:max-x bbox) (:min-x bbox)) (* 2 m))
+     :height (+ (- (:max-y bbox) (:min-y bbox)) (* 2 m))}))
 
 ;; -------- rendering --------
 
@@ -35,28 +48,30 @@
   "One stroke as a magick `polyline` primitive, translated from scene
    coordinates (origin top-centre, x may be negative) into image coordinates
    (origin top-left)."
-  [stroke tx ty]
+  [stroke tx ty k]
   (when-let [pts (seq (:points stroke))]
     (str "polyline "
          (str/join " " (map (fn [{:keys [x y]}]
-                              (str (int (- x tx)) "," (int (- y ty))))
+                              (str (int (* k (- x tx))) "," (int (* k (- y ty)))))
                             pts)))))
 
 (defn render-strokes!
   "Render `strokes` to a PNG at `out-path`, cropped to their bounding box plus a
-   margin. Returns {:path :width :height :bbox} or nil when there is nothing to
+   margin, at :resolution image pixels per page unit. Returns {:path :width :height :bbox} or nil when there is nothing to
    draw."
   ([strokes out-path] (render-strokes! strokes out-path nil))
   ([strokes out-path opts]
-   (let [{:keys [stroke-color background stroke-width margin]} (merge default-opts opts)
+   (let [{:keys [stroke-color background stroke-width margin resolution]}
+         (merge default-opts opts)
+         k (double resolution)
          bb (lines/bbox (filter lines/ink? strokes))]
      (when bb
-       (let [w (int (+ (- (:max-x bb) (:min-x bb)) (* 2 margin)))
-             h (int (+ (- (:max-y bb) (:min-y bb)) (* 2 margin)))
+       (let [w (int (* k (+ (- (:max-x bb) (:min-x bb)) (* 2 margin))))
+             h (int (* k (+ (- (:max-y bb) (:min-y bb)) (* 2 margin))))
              tx (- (:min-x bb) margin)
              ty (- (:min-y bb) margin)
              draws (mapcat (fn [pl] ["-draw" pl])
-                           (keep #(polyline-arg % tx ty) strokes))
+                           (keep #(polyline-arg % tx ty k) strokes))
              out (io/file out-path)]
          (io/make-parents out)
          (let [{:keys [exit err]}
@@ -64,7 +79,7 @@
                                      (str "xc:" background)
                                      "-fill" "none"
                                      "-stroke" stroke-color
-                                     "-strokewidth" (str stroke-width)
+                                     "-strokewidth" (str (* k stroke-width))
                                      "-antialias"]
                                     draws
                                     [(str out)]))]

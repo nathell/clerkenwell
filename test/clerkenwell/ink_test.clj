@@ -31,6 +31,18 @@
       (is (pos? (.length (io/file out)))))
     (.delete (io/file out))))
 
+(deftest resolution-scales-the-image-not-its-extent
+  (let [out (io/file (System/getProperty "java.io.tmpdir") (str "ink-" (random-uuid) ".png"))
+        bb (lines/bbox (filter lines/ink? (strokes)))
+        {:keys [width height]} (ink/extent bb)
+        r (ink/render-strokes! (strokes) out {:resolution 2})]
+    (is (= (int (* 2 width)) (:width r)))
+    (is (= (int (* 2 height)) (:height r)))
+    (testing "the file really is that size"
+      (let [img (javax.imageio.ImageIO/read (io/file out))]
+        (is (= (:width r) (.getWidth img)))))
+    (.delete (io/file out))))
+
 (deftest nothing-to-draw-is-not-an-error
   (is (nil? (ink/render-strokes! [] "/tmp/never-written.png")))
   (is (nil? (ink/render-strokes! [{:points []}] "/tmp/never-written.png"))))

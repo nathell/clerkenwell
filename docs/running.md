@@ -109,8 +109,15 @@ ordinary CIDER evaluation in the buffer sends nothing to the tablet.
 Handwriting images follow your Emacs theme -- they are shown in the buffer and
 never sent to the device, so they have no reason to be ink-on-paper.
 `clerkenwell-ink-colors` tracks the current faces by default; after changing
-theme, `M-x clerkenwell-sync-colors` redraws existing entries from their
+theme, `M-x clerkenwell-redraw` redraws existing entries from their
 retained page snapshots so the history is not left half in one scheme.
+
+Handwriting is drawn at `clerkenwell-ink-resolution` image pixels per page
+unit (2 by default) and shown at `clerkenwell-image-scale` screen pixels per
+page unit (0.8: a page-wide scribble is about 1120 pixels across). An image wider
+than the window is shrunk to fit, and refitted when the window is resized.
+Changing the scale takes effect on the next refresh; changing the resolution
+needs `M-x clerkenwell-redraw`.
 
 Ink that overlaps an existing handwriting entry vertically extends it, so a
 pause mid-paragraph does not split the paragraph in the buffer. History
