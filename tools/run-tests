@@ -1,0 +1,20 @@
+#!/bin/sh
+# Run both test suites. EMACS may be overridden for a non-standard install.
+set -e
+EMACS="${EMACS:-/Applications/Emacs.app/Contents/MacOS/Emacs}"
+cd "$(dirname "$0")/.."
+
+echo "== Clojure =="
+clojure -M:test
+
+echo
+echo "== Emacs Lisp =="
+if [ -x "$EMACS" ] || command -v "$EMACS" >/dev/null 2>&1; then
+  "$EMACS" --batch \
+    --eval '(progn (require (quote package)) (package-initialize)
+                   (add-to-list (quote load-path) (expand-file-name "emacs")))' \
+    -l emacs/clerkenwell.el -l emacs/clerkenwell-test.el \
+    -f ert-run-tests-batch-and-exit
+else
+  echo "skipped: no Emacs at $EMACS (set EMACS=...)"
+fi

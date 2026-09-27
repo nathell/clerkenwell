@@ -2,3 +2,4 @@
 /clerkenwell-state/
 /.cpcache/
 *.elc
+/.nrepl-port
