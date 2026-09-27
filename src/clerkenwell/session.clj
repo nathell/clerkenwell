@@ -339,38 +339,53 @@
    in host observation order. This is what the Emacs buffer restores from.
 
    Observation order is not exact physical writing order -- a delayed save can
-   batch strokes -- and is never reordered when late ink arrives."
+   batch strokes. An entry stays where its first strokes were observed; later
+   ink that overlaps it vertically joins it there."
   []
   (with-notebook
     (fn [nb]
       (let [m (store/read-manifest nb)]
         {:ok? true
          :entries
-         (vec (for [ev (store/read-events nb)
-                    :when (#{:result-created :ink-observed} (:event ev))]
-                (case (:event ev)
-                  :result-created
-                  (let [r (:record ev)
-                        cur (get m (:id ev))]
-                    {:kind :computation
-                     :sequence (:sequence ev)
-                     :id (:id ev)
-                     :source (:source r)
-                     :text (get-in r [:presentation :text])
-                     :namespace (:namespace r)
-                     :page-id (:page-id r)
-                     :at (:submitted-at r)
-                     :delivery (get-in cur [:delivery :state])})
+         (->> (store/read-events nb)
+              (filter #(#{:result-created :ink-observed} (:event %)))
+              (reduce
+               (fn [{:keys [entries index] :as acc} ev]
+                 (case (:event ev)
+                   :result-created
+                   (let [r (:record ev)
+                         cur (get m (:id ev))]
+                     (update acc :entries conj
+                             {:kind :computation
+                              :sequence (:sequence ev)
+                              :id (:id ev)
+                              :source (:source r)
+                              :text (get-in r [:presentation :text])
+                              :namespace (:namespace r)
+                              :page-id (:page-id r)
+                              :at (:submitted-at r)
+                              :delivery (get-in cur [:delivery :state])}))
 
-                  :ink-observed
-                  {:kind :handwriting
-                   :sequence (:sequence ev)
-                   :id (:entry-id ev)
-                   :page-id (:page-id ev)
-                   :at (:at ev)
-                   :strokes (count (:stroke-ids ev))
+                   :ink-observed
                    ;; Absolute: the state root may be relative to the JVM's
                    ;; working directory, which is not where Emacs resolves
                    ;; relative names from.
-                   :asset (.getAbsolutePath
-                           (io/file nb (get-in ev [:asset :path])))})))}))))
+                   (let [asset (.getAbsolutePath (io/file nb (get-in ev [:asset :path])))
+                         n (count (:stroke-ids ev))]
+                     (if-let [i (get index (:entry-id ev))]
+                       ;; An extension: the entry keeps its place in history
+                       ;; and shows its latest, merged image.
+                       (update-in acc [:entries i]
+                                  #(-> % (update :strokes + n) (assoc :asset asset)))
+                       (-> acc
+                           (assoc-in [:index (:entry-id ev)] (count entries))
+                           (update :entries conj
+                                   {:kind :handwriting
+                                    :sequence (:sequence ev)
+                                    :id (:entry-id ev)
+                                    :page-id (:page-id ev)
+                                    :at (:at ev)
+                                    :strokes n
+                                    :asset asset}))))))
+               {:entries [] :index {}})
+              :entries)}))))

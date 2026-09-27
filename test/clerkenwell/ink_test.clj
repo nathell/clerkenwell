@@ -89,9 +89,66 @@
       (testing "exactly the one stroke that appeared"
         (is (= 1 (count (:stroke-ids r))))
         (is (= (:item-id (last inked)) (first (:stroke-ids r)))))
-      (testing "history keeps both entries, the earlier one unchanged"
+      (testing "the log keeps both observations"
         (is (= 2 (count (filter #(= :ink-observed (:event %))
                                 (store/read-events nb)))))))))
+
+(defn- inked [] (vec (filter lines/ink? (strokes))))
+
+(defn- observe-in-two-saves!
+  "Observe `first-save`, then `second-save`, as two saves of the page."
+  [nb first-save second-save]
+  (let [bs (fixture-bytes)
+        a (ink/observe! nb {:page-id "page-1" :rm-bytes bs :strokes first-save})
+        b (ink/observe! nb {:page-id "page-1"
+                            :rm-bytes (byte-array (concat (seq bs) [0]))
+                            :strokes second-save})]
+    [a b]))
+
+(deftest ink-overlapping-an-entry-extends-it
+  (testing "pausing mid-line and carrying on does not split the line"
+    (let [nb (tmp-nb)
+          line (subvec (inked) 0 22)
+          [a b] (observe-in-two-saves! nb (subvec line 0 11) line)]
+      (is (:new? b))
+      (is (:extended? b))
+      (is (= (:entry-id a) (:entry-id b)) "the same entry, not a new one")
+      (is (= 11 (count (:stroke-ids b))) "the event records only what is new")
+      (testing "the image is redrawn from both saves' strokes"
+        (let [bb (lines/bbox line)
+              margin (:margin ink/default-opts)]
+          (is (= (int (+ (- (:max-y bb) (:min-y bb)) (* 2 margin)))
+                 (get-in b [:asset :height])))))
+      (testing "into a new file, since Emacs caches images by path"
+        (is (not= (get-in a [:asset :path]) (get-in b [:asset :path])))
+        (is (.exists (io/file (get-in b [:asset :path])))))
+      (testing "the earlier asset is left as it was"
+        (is (.exists (io/file (get-in a [:asset :path]))))))))
+
+(deftest ink-clear-of-every-entry-starts-a-new-one
+  (let [nb (tmp-nb)
+        ;; Strokes 0-5 span y 171-227; strokes 22-49 start at 247.
+        top (subvec (inked) 0 6)
+        below (subvec (inked) 22 50)
+        [a b] (observe-in-two-saves! nb top (into top below))]
+    (is (:new? b))
+    (is (not (:extended? b)))
+    (is (not= (:entry-id a) (:entry-id b)))))
+
+(deftest rerender-redraws-an-extended-entry-whole
+  (let [nb (tmp-nb)
+        line (subvec (inked) 0 22)
+        [a b] (observe-in-two-saves! nb (subvec line 0 11) line)
+        current (io/file (get-in b [:asset :path]))
+        before (store/sha256 current)
+        out (ink/rerender! nb "page-1" {:stroke-color "#c5c8c6" :background "#002451"})]
+    (is (= [(:entry-id a)] (:rendered out)) "one entry, not one per event")
+    (is (not= before (store/sha256 current)) "its current asset is the one redrawn")
+    (testing "at the size of the whole entry"
+      (let [bb (lines/bbox line)
+            margin (:margin ink/default-opts)]
+        (is (= (int (+ (- (:max-y bb) (:min-y bb)) (* 2 margin)))
+               (.getHeight (javax.imageio.ImageIO/read current))))))))
 
 (deftest rerender-redraws-from-retained-snapshots
   (testing "which is what the raw snapshots are kept for"

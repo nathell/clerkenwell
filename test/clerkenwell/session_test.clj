@@ -162,6 +162,25 @@
           (is (= "=> 3" (:text c)))
           (is (= "user" (:namespace c))))))))
 
+(deftest an-extended-entry-appears-once-in-history
+  (let [root (str (tmp-root))
+        nb (store/notebook-dir root doc)
+        bs (Files/readAllBytes (.toPath (io/file "test/resources/sample-page.rm")))
+        line (vec (take 22 (filter lines/ink? (:strokes (lines/parse bs)))))]
+    (session/start! {:state-root root :ssh-host "no-host" :port port})
+    (report-identity!)
+    (ink/observe! nb {:page-id page :rm-bytes bs :strokes (subvec line 0 11)})
+    (session/submit "(+ 1 2)" "user")
+    (let [ext (ink/observe! nb {:page-id page
+                                :rm-bytes (byte-array (concat (seq bs) [0]))
+                                :strokes line})
+          h (:entries (session/history))]
+      (testing "in its original place, ahead of the computation"
+        (is (= [:handwriting :computation] (map :kind h))))
+      (testing "counting every stroke, and showing the merged image"
+        (is (= 22 (:strokes (first h))))
+        (is (= (.getAbsolutePath (io/file (get-in ext [:asset :path]))) (:asset (first h))))))))
+
 (deftest archive-sets-history-aside-without-destroying-it
   (let [root (str (tmp-root))
         nb (store/notebook-dir root doc)

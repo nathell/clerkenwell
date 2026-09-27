@@ -3,8 +3,12 @@
 
    This is an ordered historical record, not a mirror of the page. The renderer
    draws fixed-width polylines, so erasures, transformations, layers, brush
-   appearance and existing images are approximate or absent. Later tablet edits
-   never rewrite earlier entries; new annotations become new entries.
+   appearance and existing images are approximate or absent.
+
+   New strokes that overlap an existing entry vertically extend that entry
+   rather than starting a new one, so pausing mid-paragraph does not split it.
+   Extension is itself an appended event sharing the entry's id: the log is
+   never rewritten, and an entry is the group of events that carry its id.
 
    Two rules keep the history honest:
 
@@ -109,34 +113,67 @@
     (.update md bs)
     (apply str (map #(format "%02x" (bit-and % 0xff)) (.digest md)))))
 
+(defn- ink-events [nb page-id]
+  (filter #(and (= :ink-observed (:event %))
+                (or (nil? page-id) (= page-id (:page-id %))))
+          (store/read-events nb)))
+
+(defn- entries
+  "Ink events grouped into entries, in order of each entry's first event."
+  [events]
+  (let [order (distinct (map :entry-id events))
+        by-id (group-by :entry-id events)]
+    (map #(get by-id %) order)))
+
+(defn- bbox-union [bbs]
+  (when-let [bbs (seq (remove nil? bbs))]
+    {:min-x (apply min (map :min-x bbs)) :min-y (apply min (map :min-y bbs))
+     :max-x (apply max (map :max-x bbs)) :max-y (apply max (map :max-y bbs))}))
+
+(defn- y-overlap? [a b]
+  (and (<= (:min-y a) (:max-y b)) (<= (:min-y b) (:max-y a))))
+
+(defn- event-strokes
+  "The strokes one event contributed, read back from its retained snapshot, or
+   nil when the snapshot is gone."
+  [nb ev]
+  (let [snap (io/file (store/page-dir nb (:page-id ev)) (str (:snapshot-id ev) ".rm"))]
+    (when (.exists snap)
+      (let [parsed (try (lines/parse (java.nio.file.Files/readAllBytes (.toPath snap)))
+                        (catch Exception _ nil))
+            wanted (set (:stroke-ids ev))]
+        (seq (filter #(contains? wanted (:item-id %)) (:strokes parsed)))))))
+
+(defn- extendable-entry
+  "The entry on `page-id` that `bb` overlaps vertically, if any. When several
+   do, the one extended most recently wins -- a simplification: the others are
+   left separate rather than merged together."
+  [nb page-id bb]
+  (->> (entries (ink-events nb page-id))
+       (filter #(y-overlap? bb (bbox-union (map :bbox %))))
+       (sort-by #(:sequence (last %)))
+       last))
+
 (defn rerender!
   "Redraw every handwriting asset for `page-id` (or all pages) with `opts`.
 
-   This is what the retained raw snapshots are for. Each entry records the
-   snapshot it came from and the stroke ids it covered, so its image can be
-   reproduced exactly -- which is how a colour-scheme change reaches entries
-   recorded before it."
+   This is what the retained raw snapshots are for. Each event records the
+   snapshot it came from and the stroke ids it contributed, so an entry's image
+   can be reproduced exactly from its events -- which is how a colour-scheme
+   change reaches entries recorded before it. Only an entry's current asset,
+   the one its latest event names, is redrawn."
   ([nb] (rerender! nb nil nil))
   ([nb page-id opts]
-   (let [events (filter #(and (= :ink-observed (:event %))
-                              (or (nil? page-id) (= page-id (:page-id %))))
-                        (store/read-events nb))]
-     (reduce
-      (fn [acc ev]
-        (let [snap (io/file (store/page-dir nb (:page-id ev))
-                            (str (:snapshot-id ev) ".rm"))]
-          (if-not (.exists snap)
-            (update acc :skipped conj (:entry-id ev))
-            (let [parsed (try (lines/parse (java.nio.file.Files/readAllBytes (.toPath snap)))
-                              (catch Exception _ nil))
-                  wanted (set (:stroke-ids ev))
-                  strokes (filter #(contains? wanted (:item-id %)) (:strokes parsed))]
-              (if (empty? strokes)
-                (update acc :skipped conj (:entry-id ev))
-                (do (render-strokes! strokes (store/handwriting-file nb (:entry-id ev)) opts)
-                    (update acc :rendered conj (:entry-id ev))))))))
-      {:rendered [] :skipped []}
-      events))))
+   (reduce
+    (fn [acc evs]
+      (let [id (:entry-id (first evs))
+            strokes (mapcat #(event-strokes nb %) evs)]
+        (if (empty? strokes)
+          (update acc :skipped conj id)
+          (do (render-strokes! strokes (io/file nb (get-in (last evs) [:asset :path])) opts)
+              (update acc :rendered conj id)))))
+    {:rendered [] :skipped []}
+    (entries (ink-events nb page-id)))))
 
 (defn observe!
   "Record whatever is new in a stable page snapshot.
@@ -159,22 +196,31 @@
           ;; A save with no new ink -- which is exactly what an inserted result
           ;; image produces, since scene items are not strokes. No entry.
           {:new? false :reason :no-new-strokes :snapshot-id snapshot-id}
-          (let [entry-id (str (random-uuid))
-                bb (lines/bbox fresh)
+          (let [bb (lines/bbox fresh)
+                target (extendable-entry nb page-id bb)
+                entry-id (if target (:entry-id (first target)) (str (random-uuid)))
+                ;; An extended entry gets a new file: Emacs caches images by
+                ;; path, so redrawing in place would keep showing the old one.
+                asset-name (if target
+                             (str entry-id "-" (subs snapshot-id 0 12))
+                             entry-id)
+                strokes (concat (mapcat #(event-strokes nb %) target) fresh)
                 snap-file (io/file (store/page-dir nb page-id) (str snapshot-id ".rm"))
-                png-file (store/handwriting-file nb entry-id)]
+                png-file (store/handwriting-file nb asset-name)]
             ;; Assets first.
             (store/publish-bytes! snap-file rm-bytes)
-            (let [r (render-strokes! fresh png-file render-opts)]
+            (let [r (render-strokes! strokes png-file render-opts)]
               ;; Then commit the ids.
               (store/append-event!
-               nb {:event :ink-observed
-                   :page-id page-id
-                   :entry-id entry-id
-                   :snapshot-id snapshot-id
-                   :stroke-ids (mapv :item-id fresh)
-                   :bbox bb
-                   :asset {:path (str "handwriting/" entry-id ".png")
-                           :width (:width r) :height (:height r)}})
+               nb (cond-> {:event :ink-observed
+                           :page-id page-id
+                           :entry-id entry-id
+                           :snapshot-id snapshot-id
+                           :stroke-ids (mapv :item-id fresh)
+                           :bbox bb
+                           :asset {:path (str "handwriting/" asset-name ".png")
+                                   :width (:width r) :height (:height r)}}
+                    target (assoc :extends? true)))
               {:new? true :entry-id entry-id :snapshot-id snapshot-id
+               :extended? (boolean target)
                :stroke-ids (mapv :item-id fresh) :bbox bb :asset r})))))))
