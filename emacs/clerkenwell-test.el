@@ -7,6 +7,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'cl-lib)
 (require 'clerkenwell)
 
 (defun clerkenwell-test--parse (edn)
@@ -250,6 +251,42 @@ keywords, so the rendering tests passed while nothing rendered at all."
    (let ((pos (point)))
      (clerkenwell--rebuild-history clerkenwell-test--entries)
      (should (= pos (point))))))
+
+(defmacro clerkenwell-test--with-images (&rest body)
+  "Run BODY as if in a graphical frame, with each image inserted as \"[img]\"."
+  `(cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
+             ((symbol-function 'display-images-p) (lambda (&rest _) t))
+             ((symbol-function 'insert-image) (lambda (&rest _) (insert "[img]"))))
+     ,@body))
+
+(defun clerkenwell-test--history (&rest kinds)
+  "A history of entries of KINDS, with handwriting pointing at a real file."
+  (let ((asset (make-temp-file "ckw-img" nil ".png")))
+    (clerkenwell-test--entries
+     (concat "{:ok? true :entries ["
+             (mapconcat
+              (lambda (k)
+                (if (eq k 'ink)
+                    (format "{:kind :handwriting :id \"e\" :strokes 1 :asset %S :page-width 100}" asset)
+                  "{:kind :computation :id \"r\" :source \"(+ 1 2)\" :text \"=> 3\" :delivery :inserted}"))
+              kinds " ")
+             "]}"))))
+
+(ert-deftest clerkenwell-test-consecutive-images-are-not-separated ()
+  "Handwriting split across entries reads as continuous, as on the page."
+  (clerkenwell-test--with-images
+   (clerkenwell-test--with-buffer
+    (let ((clerkenwell-quiet t))
+      (clerkenwell--rebuild-history (clerkenwell-test--history 'ink 'ink 'ink))
+      (should (string-match-p "\\[img\\]\n\\[img\\]\n\\[img\\]\n\n" (buffer-string)))))))
+
+(ert-deftest clerkenwell-test-image-before-computation-keeps-its-blank ()
+  "Only image-to-image separation goes; a computation still stands apart."
+  (clerkenwell-test--with-images
+   (clerkenwell-test--with-buffer
+    (let ((clerkenwell-quiet t))
+      (clerkenwell--rebuild-history (clerkenwell-test--history 'ink 'code 'ink))
+      (should (string-match-p "\\[img\\]\n\n(\\+ 1 2)" (buffer-string)))))))
 
 (provide 'clerkenwell-test)
 ;;; clerkenwell-test.el ends here

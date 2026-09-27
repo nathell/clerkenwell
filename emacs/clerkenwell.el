@@ -274,8 +274,30 @@ make Emacs wrap it."
   "Pixels to show an image PAGE-WIDTH page units wide at, within AVAILABLE."
   (max 1 (min (round (* page-width clerkenwell-image-scale)) available)))
 
-(defun clerkenwell--render-entry (entry)
-  "Insert one history ENTRY at point."
+(defun clerkenwell--image-problem (entry)
+  "Why handwriting ENTRY cannot be shown as an image, or nil if it can.
+Also nil when images are turned off, which is a choice, not a problem."
+  (let ((asset (clerkenwell--get entry :asset)))
+    (cond
+     ((not clerkenwell-show-images) nil)
+     ((not (display-graphic-p)) "no graphics in this frame")
+     ((not (display-images-p)) "images unsupported")
+     ((null asset) "no asset recorded")
+     ((not (file-readable-p asset))
+      (format "unreadable: %s" asset)))))
+
+(defun clerkenwell--shows-image-p (entry)
+  "Whether ENTRY is rendered as an image."
+  (and entry
+       clerkenwell-show-images
+       (equal "handwriting" (clerkenwell--name (clerkenwell--get entry :kind)))
+       (not (clerkenwell--image-problem entry))))
+
+(defun clerkenwell--render-entry (entry &optional next)
+  "Insert one history ENTRY at point.
+NEXT is the entry that follows it, if any: consecutive images are not
+separated by a blank line, so handwriting reads as continuous, as on
+the page."
   (let ((kind (clerkenwell--get entry :kind)))
     (pcase (clerkenwell--name kind)
       ("handwriting"
@@ -283,13 +305,7 @@ make Emacs wrap it."
               (n (clerkenwell--get entry :strokes))
               ;; Say why an image is absent rather than quietly showing only
               ;; the header, which is indistinguishable from working.
-              (problem (cond
-                        ((not clerkenwell-show-images) nil)
-                        ((not (display-graphic-p)) "no graphics in this frame")
-                        ((not (display-images-p)) "images unsupported")
-                        ((null asset) "no asset recorded")
-                        ((not (file-readable-p asset))
-                         (format "unreadable: %s" asset)))))
+              (problem (clerkenwell--image-problem entry)))
          ;; The header is commentary the page does not have, but a problem is
          ;; not: without it a missing image is indistinguishable from a blank
          ;; one.
@@ -312,7 +328,7 @@ make Emacs wrap it."
                 ;; A session older than this buffer, which does not report
                 ;; sizes: assume the image was drawn at page resolution.
                 (create-image asset nil nil :scale clerkenwell-image-scale))))
-           (insert "\n\n"))))
+           (insert (if (clerkenwell--shows-image-p next) "\n" "\n\n")))))
       ("computation"
        (let ((src (clerkenwell--get entry :source))
              (text (clerkenwell--get entry :text))
@@ -360,7 +376,10 @@ text, point and mark are restored around the rewrite."
       (insert (propertize ";; Clerkenwell\n\n" 'face 'font-lock-comment-face))
       ;; The separator stays even when quiet: it is structure, not commentary,
       ;; and without it there is no way to see where the editable region starts.
-      (mapc #'clerkenwell--render-entry entries)
+      (let ((es entries))
+        (while es
+          (clerkenwell--render-entry (car es) (cadr es))
+          (setq es (cdr es))))
       (insert clerkenwell--separator)
       (clerkenwell--protect (point-min) (point))
       (setq clerkenwell--history-end (copy-marker (point) nil))
