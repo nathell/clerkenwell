@@ -113,25 +113,57 @@
     (.update md bs)
     (apply str (map #(format "%02x" (bit-and % 0xff)) (.digest md)))))
 
-(defn- ink-events [nb page-id]
-  (filter #(and (= :ink-observed (:event %))
+(defn- ink-events
+  "Observations and joins for `page-id` (or all pages), in sequence order."
+  [nb page-id]
+  (filter #(and (#{:ink-observed :ink-joined} (:event %))
                 (or (nil? page-id) (= page-id (:page-id %))))
           (store/read-events nb)))
 
-(defn- entries
-  "Ink events grouped into entries, in order of each entry's first event."
+(defn- root-of
+  "A function from an entry id to the entry it now belongs to, following joins
+   transitively."
   [events]
-  (let [order (distinct (map :entry-id events))
-        by-id (group-by :entry-id events)]
-    (map #(get by-id %) order)))
+  (let [joins (into {} (for [e events :when (= :ink-joined (:event e))]
+                         [(:entry-id e) (:into e)]))]
+    (fn [id] (loop [id id] (if-let [t (get joins id)] (recur t) id)))))
 
 (defn- bbox-union [bbs]
   (when-let [bbs (seq (remove nil? bbs))]
     {:min-x (apply min (map :min-x bbs)) :min-y (apply min (map :min-y bbs))
      :max-x (apply max (map :max-x bbs)) :max-y (apply max (map :max-y bbs))}))
 
+(defn entry-groups
+  "`events` (observations and joins) grouped into entries, in order of each
+   entry's first observation. Each group is {:entry-id :events :bbox :asset},
+   where :events are its observations and :asset the image most recently drawn
+   for it, by either an observation or a join."
+  [events]
+  (let [root (root-of events)
+        owner (comp root :entry-id)
+        obs (filter #(= :ink-observed (:event %)) events)
+        by-root (group-by owner obs)
+        asset (reduce (fn [m e] (if-let [a (:asset e)] (assoc m (owner e) a) m))
+                      {} events)]
+    (for [id (distinct (map owner obs))
+          :let [evs (by-root id)]]
+      {:entry-id id :events evs :bbox (bbox-union (map :bbox evs)) :asset (asset id)})))
+
 (defn- y-overlap? [a b]
   (and (<= (:min-y a) (:max-y b)) (<= (:min-y b) (:max-y a))))
+
+(defn- most-recent-overlapping
+  "Of `clusters` (collections of observations), the one `bb` overlaps
+   vertically, or nil. When several do, the one added to most recently wins --
+   a simplification: the others are left separate rather than merged together.
+
+   This is THE merging rule. Live observation and `regroup!` both use it, which
+   is what makes regrouping a notebook recorded under it a no-op."
+  [bb clusters]
+  (->> clusters
+       (filter #(y-overlap? bb (bbox-union (map :bbox %))))
+       (sort-by #(apply max (map :sequence %)))
+       last))
 
 (defn- event-strokes
   "The strokes one event contributed, read back from its retained snapshot, or
@@ -145,35 +177,88 @@
         (seq (filter #(contains? wanted (:item-id %)) (:strokes parsed)))))))
 
 (defn- extendable-entry
-  "The entry on `page-id` that `bb` overlaps vertically, if any. When several
-   do, the one extended most recently wins -- a simplification: the others are
-   left separate rather than merged together."
+  "The entry group on `page-id` that `bb` should extend, if any."
   [nb page-id bb]
-  (->> (entries (ink-events nb page-id))
-       (filter #(y-overlap? bb (bbox-union (map :bbox %))))
-       (sort-by #(:sequence (last %)))
-       last))
+  (let [groups (entry-groups (ink-events nb page-id))
+        hit (most-recent-overlapping bb (map :events groups))]
+    (when hit (first (filter #(= hit (:events %)) groups)))))
 
 (defn rerender!
   "Redraw every handwriting asset for `page-id` (or all pages) with `opts`.
 
-   This is what the retained raw snapshots are for. Each event records the
+   This is what the retained raw snapshots are for. Each observation records the
    snapshot it came from and the stroke ids it contributed, so an entry's image
-   can be reproduced exactly from its events -- which is how a colour-scheme
-   change reaches entries recorded before it. Only an entry's current asset,
-   the one its latest event names, is redrawn."
+   can be reproduced exactly from its observations -- which is how a
+   colour-scheme change reaches entries recorded before it. Only an entry's
+   current asset is redrawn."
   ([nb] (rerender! nb nil nil))
   ([nb page-id opts]
    (reduce
-    (fn [acc evs]
-      (let [id (:entry-id (first evs))
-            strokes (mapcat #(event-strokes nb %) evs)]
+    (fn [acc {:keys [entry-id events asset]}]
+      (let [strokes (mapcat #(event-strokes nb %) events)]
         (if (empty? strokes)
-          (update acc :skipped conj id)
-          (do (render-strokes! strokes (io/file nb (get-in (last evs) [:asset :path])) opts)
-              (update acc :rendered conj id)))))
+          (update acc :skipped conj entry-id)
+          (do (render-strokes! strokes (io/file nb (:path asset)) opts)
+              (update acc :rendered conj entry-id)))))
     {:rendered [] :skipped []}
-    (entries (ink-events nb page-id)))))
+    (entry-groups (ink-events nb page-id)))))
+
+(defn- replay
+  "Replay observations in order under the merging rule, ignoring how they were
+   grouped when recorded. Returns clusters of observations."
+  [obs]
+  (reduce (fn [clusters ev]
+            (if-let [hit (most-recent-overlapping (:bbox ev) clusters)]
+              (mapv #(if (identical? % hit) (conj % ev) %) clusters)
+              (conj clusters [ev])))
+          [] obs))
+
+(defn regroup!
+  "Apply the merging rule retroactively to `page-id` (or every page).
+
+   Handwriting recorded before overlapping ink extended entries was split into
+   one entry per save. This replays the observations, and wherever entries now
+   belong together, redraws the earliest of them from all their strokes and
+   appends a join for each of the others. Nothing recorded is rewritten; the
+   joined entries' events and images remain.
+
+   Idempotent: once applied, replay agrees with the recorded grouping. Returns
+   {:joined [{:into id :entries [id ...]}] :skipped [ids]}."
+  ([nb] (regroup! nb nil nil))
+  ([nb page-id opts]
+   (let [events (ink-events nb page-id)
+         root (root-of events)
+         groups (entry-groups events)
+         position (zipmap (map :entry-id groups) (range))
+         pages (distinct (map :page-id (filter #(= :ink-observed (:event %)) events)))]
+     (reduce
+      (fn [acc cluster]
+        (let [ids (sort-by position (distinct (map (comp root :entry-id) cluster)))]
+          (if-not (next ids)
+            acc
+            (let [[target & joined] ids
+                  members (set ids)
+                  evs (mapcat :events (filter #(members (:entry-id %)) groups))
+                  strokes (mapcat #(event-strokes nb %) evs)
+                  asset-name (str target "-" (subs (str (random-uuid)) 0 8))
+                  png (store/handwriting-file nb asset-name)]
+              (if (empty? strokes)
+                (update acc :skipped conj target)
+                ;; The merged image first, then the joins that point at it.
+                (let [r (render-strokes! strokes png opts)]
+                  (doseq [id joined]
+                    (store/append-event!
+                     nb {:event :ink-joined
+                         :page-id (:page-id (first cluster))
+                         :entry-id id
+                         :into target
+                         :asset {:path (str "handwriting/" asset-name ".png")
+                                 :width (:width r) :height (:height r)}}))
+                  (update acc :joined conj {:into target :entries (vec joined)})))))))
+      {:joined [] :skipped []}
+      (mapcat (fn [p] (replay (filter #(and (= :ink-observed (:event %)) (= p (:page-id %)))
+                                      events)))
+              pages)))))
 
 (defn observe!
   "Record whatever is new in a stable page snapshot.
@@ -198,13 +283,13 @@
           {:new? false :reason :no-new-strokes :snapshot-id snapshot-id}
           (let [bb (lines/bbox fresh)
                 target (extendable-entry nb page-id bb)
-                entry-id (if target (:entry-id (first target)) (str (random-uuid)))
+                entry-id (if target (:entry-id target) (str (random-uuid)))
                 ;; An extended entry gets a new file: Emacs caches images by
                 ;; path, so redrawing in place would keep showing the old one.
                 asset-name (if target
                              (str entry-id "-" (subs snapshot-id 0 12))
                              entry-id)
-                strokes (concat (mapcat #(event-strokes nb %) target) fresh)
+                strokes (concat (mapcat #(event-strokes nb %) (:events target)) fresh)
                 snap-file (io/file (store/page-dir nb page-id) (str snapshot-id ".rm"))
                 png-file (store/handwriting-file nb asset-name)]
             ;; Assets first.

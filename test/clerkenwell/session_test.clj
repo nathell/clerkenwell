@@ -181,6 +181,41 @@
         (is (= 22 (:strokes (first h))))
         (is (= (.getAbsolutePath (io/file (get-in ext [:asset :path]))) (:asset (first h))))))))
 
+(defn- legacy-observe!
+  "Record `strokes` as a separate entry, as observation did before overlapping
+   ink extended entries."
+  [nb bs strokes]
+  (let [snapshot-id (str (random-uuid))
+        entry-id (str (random-uuid))]
+    (store/publish-bytes! (io/file (store/page-dir nb page) (str snapshot-id ".rm")) bs)
+    (ink/render-strokes! strokes (store/handwriting-file nb entry-id))
+    (store/append-event! nb {:event :ink-observed :page-id page
+                             :entry-id entry-id :snapshot-id snapshot-id
+                             :stroke-ids (mapv :item-id strokes)
+                             :bbox (lines/bbox strokes)
+                             :asset {:path (str "handwriting/" entry-id ".png")}})))
+
+(deftest regroup-merges-split-entries-in-history
+  (let [root (str (tmp-root))
+        nb (store/notebook-dir root doc)
+        bs (Files/readAllBytes (.toPath (io/file "test/resources/sample-page.rm")))
+        line (vec (take 22 (filter lines/ink? (:strokes (lines/parse bs)))))]
+    (session/start! {:state-root root :ssh-host "no-host" :port port})
+    (report-identity!)
+    (legacy-observe! nb bs (subvec line 0 11))
+    (session/submit "(+ 1 2)" "user")
+    (legacy-observe! nb bs (subvec line 11))
+    (is (= [:handwriting :computation :handwriting]
+           (map :kind (:entries (session/history)))))
+    (let [r (session/regroup)]
+      (is (:ok? r))
+      (is (= 1 (:merged r))))
+    (let [h (:entries (session/history))]
+      (testing "the later entry joins the earlier, which keeps its place"
+        (is (= [:handwriting :computation] (map :kind h))))
+      (is (= 22 (:strokes (first h))))
+      (is (.exists (io/file (:asset (first h))))))))
+
 (deftest archive-sets-history-aside-without-destroying-it
   (let [root (str (tmp-root))
         nb (store/notebook-dir root doc)

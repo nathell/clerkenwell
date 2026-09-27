@@ -150,6 +150,92 @@
         (is (= (int (+ (- (:max-y bb) (:min-y bb)) (* 2 margin)))
                (.getHeight (javax.imageio.ImageIO/read current))))))))
 
+(defn- legacy-observe!
+  "Record `save` as a separate entry, as observation did before overlapping ink
+   extended entries: the history `regroup!` exists to repair."
+  [nb save]
+  (let [bs (fixture-bytes)
+        snapshot-id (str (random-uuid))
+        entry-id (str (random-uuid))
+        fresh (lines/new-strokes (ink/observed-ids nb "page-1") save)]
+    (store/publish-bytes! (io/file (store/page-dir nb "page-1") (str snapshot-id ".rm")) bs)
+    (let [r (ink/render-strokes! fresh (store/handwriting-file nb entry-id))]
+      (store/append-event! nb {:event :ink-observed :page-id "page-1"
+                               :entry-id entry-id :snapshot-id snapshot-id
+                               :stroke-ids (mapv :item-id fresh)
+                               :bbox (lines/bbox fresh)
+                               :asset {:path (str "handwriting/" entry-id ".png")
+                                       :width (:width r) :height (:height r)}})
+      entry-id)))
+
+(defn- groups [nb]
+  (ink/entry-groups (filter #(#{:ink-observed :ink-joined} (:event %))
+                            (store/read-events nb))))
+
+(deftest regroup-joins-entries-split-before-extension-existed
+  (let [nb (tmp-nb)
+        line (subvec (inked) 0 22)
+        a (legacy-observe! nb (subvec line 0 11))
+        _ (legacy-observe! nb line)]
+    (is (= 2 (count (groups nb))) "the split history")
+    (let [r (ink/regroup! nb)]
+      (is (= 1 (count (:joined r))))
+      (is (= a (:into (first (:joined r)))) "into the earlier entry"))
+    (let [[g & more] (groups nb)]
+      (is (empty? more) "one entry now")
+      (is (= a (:entry-id g)))
+      (testing "drawn from both saves' strokes, into a new file"
+        (let [bb (lines/bbox line)
+              margin (:margin ink/default-opts)
+              img (io/file nb (get-in g [:asset :path]))]
+          (is (not= (str "handwriting/" a ".png") (get-in g [:asset :path])))
+          (is (= (int (+ (- (:max-y bb) (:min-y bb)) (* 2 margin)))
+                 (.getHeight (javax.imageio.ImageIO/read img)))))))
+    (testing "the observations themselves are untouched"
+      (is (= 2 (count (filter #(= :ink-observed (:event %)) (store/read-events nb))))))))
+
+(deftest regroup-is-idempotent
+  (let [nb (tmp-nb)
+        line (subvec (inked) 0 22)]
+    (legacy-observe! nb (subvec line 0 11))
+    (legacy-observe! nb line)
+    (ink/regroup! nb)
+    (let [n (count (store/read-events nb))
+          again (ink/regroup! nb)]
+      (is (empty? (:joined again)))
+      (is (= n (count (store/read-events nb))) "and appended nothing"))))
+
+(deftest regroup-does-nothing-to-history-recorded-with-extension
+  (let [nb (tmp-nb)
+        line (subvec (inked) 0 22)]
+    (observe-in-two-saves! nb (subvec line 0 11) line)
+    (is (empty? (:joined (ink/regroup! nb))))))
+
+(deftest regroup-leaves-separate-ink-separate
+  (let [nb (tmp-nb)
+        top (subvec (inked) 0 6)]
+    (legacy-observe! nb top)
+    (legacy-observe! nb (into top (subvec (inked) 22 50)))
+    (is (empty? (:joined (ink/regroup! nb))))
+    (is (= 2 (count (groups nb))))))
+
+(deftest live-ink-extends-a-regrouped-entry
+  (let [nb (tmp-nb)
+        line (subvec (inked) 0 22)
+        a (legacy-observe! nb (subvec line 0 7))]
+    (legacy-observe! nb (subvec line 0 14))
+    (ink/regroup! nb)
+    (let [r (ink/observe! nb {:page-id "page-1"
+                              :rm-bytes (byte-array (concat (seq (fixture-bytes)) [0 0 0]))
+                              :strokes line})]
+      (is (:extended? r))
+      (is (= a (:entry-id r)) "the entry the others were joined into"))
+    (let [[g & more] (groups nb)]
+      (is (empty? more))
+      (is (= 22 (reduce + (map (comp count :stroke-ids) (:events g))))))
+    (testing "and a colour change redraws it once, whole"
+      (is (= [a] (:rendered (ink/rerender! nb "page-1" {:stroke-color "white"})))))))
+
 (deftest rerender-redraws-from-retained-snapshots
   (testing "which is what the raw snapshots are kept for"
     (let [nb (tmp-nb)

@@ -344,48 +344,52 @@
   []
   (with-notebook
     (fn [nb]
-      (let [m (store/read-manifest nb)]
+      (let [m (store/read-manifest nb)
+            events (store/read-events nb)
+            ;; An entry is shown once, where its first observation was, with the
+            ;; image most recently drawn for it -- whether by an extension or by
+            ;; a retroactive join.
+            groups (ink/entry-groups
+                    (filter #(#{:ink-observed :ink-joined} (:event %)) events))
+            first-seen (into {} (map (fn [g] [(:sequence (first (:events g))) g]) groups))]
         {:ok? true
          :entries
-         (->> (store/read-events nb)
-              (filter #(#{:result-created :ink-observed} (:event %)))
-              (reduce
-               (fn [{:keys [entries index] :as acc} ev]
-                 (case (:event ev)
-                   :result-created
-                   (let [r (:record ev)
-                         cur (get m (:id ev))]
-                     (update acc :entries conj
-                             {:kind :computation
-                              :sequence (:sequence ev)
-                              :id (:id ev)
-                              :source (:source r)
-                              :text (get-in r [:presentation :text])
-                              :namespace (:namespace r)
-                              :page-id (:page-id r)
-                              :at (:submitted-at r)
-                              :delivery (get-in cur [:delivery :state])}))
+         (vec
+          (for [ev events
+                :let [g (get first-seen (:sequence ev))]
+                :when (or (= :result-created (:event ev))
+                          (and (= :ink-observed (:event ev)) g))]
+            (case (:event ev)
+              :result-created
+              (let [r (:record ev)
+                    cur (get m (:id ev))]
+                {:kind :computation
+                 :sequence (:sequence ev)
+                 :id (:id ev)
+                 :source (:source r)
+                 :text (get-in r [:presentation :text])
+                 :namespace (:namespace r)
+                 :page-id (:page-id r)
+                 :at (:submitted-at r)
+                 :delivery (get-in cur [:delivery :state])})
 
-                   :ink-observed
-                   ;; Absolute: the state root may be relative to the JVM's
-                   ;; working directory, which is not where Emacs resolves
-                   ;; relative names from.
-                   (let [asset (.getAbsolutePath (io/file nb (get-in ev [:asset :path])))
-                         n (count (:stroke-ids ev))]
-                     (if-let [i (get index (:entry-id ev))]
-                       ;; An extension: the entry keeps its place in history
-                       ;; and shows its latest, merged image.
-                       (update-in acc [:entries i]
-                                  #(-> % (update :strokes + n) (assoc :asset asset)))
-                       (-> acc
-                           (assoc-in [:index (:entry-id ev)] (count entries))
-                           (update :entries conj
-                                   {:kind :handwriting
-                                    :sequence (:sequence ev)
-                                    :id (:entry-id ev)
-                                    :page-id (:page-id ev)
-                                    :at (:at ev)
-                                    :strokes n
-                                    :asset asset}))))))
-               {:entries [] :index {}})
-              :entries)}))))
+              :ink-observed
+              {:kind :handwriting
+               :sequence (:sequence ev)
+               :id (:entry-id g)
+               :page-id (:page-id ev)
+               :at (:at ev)
+               :strokes (reduce + (map (comp count :stroke-ids) (:events g)))
+               ;; Absolute: the state root may be relative to the JVM's
+               ;; working directory, which is not where Emacs resolves
+               ;; relative names from.
+               :asset (.getAbsolutePath (io/file nb (get-in g [:asset :path])))})))}))))
+
+(defn regroup
+  "Retroactively merge handwriting entries that overlap vertically, as live
+   observation now does. Safe to repeat: a second run finds nothing to do."
+  []
+  (with-notebook
+    (fn [nb]
+      (let [r (ink/regroup! nb nil (:render-opts @session))]
+        (assoc r :ok? true :merged (reduce + (map (comp count :entries) (:joined r))))))))

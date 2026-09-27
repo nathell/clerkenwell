@@ -112,6 +112,11 @@ never sent to the device, so they have no reason to be ink-on-paper.
 theme, `M-x clerkenwell-sync-colors` redraws existing entries from their
 retained page snapshots so the history is not left half in one scheme.
 
+Ink that overlaps an existing handwriting entry vertically extends it, so a
+pause mid-paragraph does not split the paragraph in the buffer. History
+recorded before this behaviour can be brought into line with
+`M-x clerkenwell-regroup`; it only appends, and a second run does nothing.
+
 The buffer is quiet by default: it shows handwriting images and computations
 much as the page does, without per-entry headers. Delivery state still appears
 whenever it is anything but `inserted`, so a result still in flight, failed or

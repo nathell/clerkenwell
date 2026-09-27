@@ -481,6 +481,24 @@ PRESENT non-nil means the result is visibly on the page."
            (clerkenwell--clj-string result-id) (if present "true" "false")))
   (clerkenwell-refresh))
 
+(defun clerkenwell-regroup ()
+  "Merge handwriting entries that overlap vertically into one.
+New ink that overlaps an entry already extends it; this applies the same
+rule to history recorded before it did.  Nothing is rewritten, and running
+it again does nothing."
+  (interactive)
+  (let ((r (clerkenwell--eval-sync "(clerkenwell.session/regroup)")))
+    (if (and r (clerkenwell--get r :ok?))
+        (let ((n (clerkenwell--get r :merged 0)))
+          (setq clerkenwell--history-version nil)
+          (clerkenwell-refresh)
+          (message "Clerkenwell: %s" (if (zerop n)
+                                         "nothing to regroup"
+                                       (format "%d entr%s merged into others"
+                                               n (if (= n 1) "y" "ies")))))
+      (message "Clerkenwell: %s"
+               (or (and r (clerkenwell--get r :message)) "could not regroup")))))
+
 (defun clerkenwell-sync-colors ()
   "Redraw handwriting images in the current theme's colours.
 Existing entries are redrawn from their retained page snapshots, so the
