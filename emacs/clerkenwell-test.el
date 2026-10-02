@@ -288,5 +288,32 @@ keywords, so the rendering tests passed while nothing rendered at all."
       (clerkenwell--rebuild-history (clerkenwell-test--history 'ink 'code 'ink))
       (should (string-match-p "\\[img\\]\n\n(\\+ 1 2)" (buffer-string)))))))
 
+(ert-deftest clerkenwell-test-failing-entry-is-shown-not-fatal ()
+  "An entry that cannot be rendered becomes a warning; the rest still render."
+  (clerkenwell-test--with-images
+   (clerkenwell-test--with-buffer
+    (cl-letf (((symbol-function 'clerkenwell--image-width)
+               (lambda (&rest _) (error "Boom"))))
+      (clerkenwell--rebuild-history (clerkenwell-test--history 'ink 'code))
+      (should (string-match-p "could not render entry e: Boom" (buffer-string)))
+      (should (string-match-p "(\\+ 1 2)" (buffer-string)))))))
+
+(ert-deftest clerkenwell-test-failed-rebuild-does-not-duplicate-history ()
+  "A rebuild that fails part-way must not leave the history readable as draft.
+Otherwise the next rebuild appends the whole previous buffer below the
+separator, header and all."
+  (clerkenwell-test--with-buffer
+   (clerkenwell--rebuild-history clerkenwell-test--entries)
+   (goto-char (point-max))
+   (insert "(my-draft)")
+   ;; Fail after the erase, outside any per-entry guard.
+   (cl-letf (((symbol-function 'propertize)
+              (lambda (&rest _) (error "Mid-rebuild failure"))))
+     (ignore-errors (clerkenwell--rebuild-history clerkenwell-test--entries)))
+   (should (equal "(my-draft)" (clerkenwell-draft)))
+   (clerkenwell--rebuild-history clerkenwell-test--entries)
+   (should (equal "(my-draft)" (clerkenwell-draft)))
+   (should (= 1 (how-many ";; Clerkenwell" (point-min) (point-max))))))
+
 (provide 'clerkenwell-test)
 ;;; clerkenwell-test.el ends here

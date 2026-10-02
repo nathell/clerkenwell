@@ -354,6 +354,17 @@ the page."
                                    (if (string-empty-p other) "missing" other))
                            'face 'font-lock-warning-face))))))
 
+(defun clerkenwell--render-entry-safely (entry next)
+  "Render ENTRY, or a visible warning in its place if rendering fails.
+One bad entry must not cost the rest of the history."
+  (condition-case err
+      (clerkenwell--render-entry entry next)
+    (error
+     (insert (propertize (format ";; could not render entry %s: %s\n\n"
+                                 (clerkenwell--get entry :id)
+                                 (error-message-string err))
+                         'face 'font-lock-warning-face)))))
+
 (defun clerkenwell--rebuild-history (entries)
   "Replace the history region with ENTRIES, preserving the draft and point.
 Asynchronous updates must not disturb what you are typing, so the draft
@@ -373,17 +384,26 @@ text, point and mark are restored around the rewrite."
     (save-restriction
       (widen)
       (erase-buffer)
-      (insert (propertize ";; Clerkenwell\n\n" 'face 'font-lock-comment-face))
-      ;; The separator stays even when quiet: it is structure, not commentary,
-      ;; and without it there is no way to see where the editable region starts.
-      (let ((es entries))
-        (while es
-          (clerkenwell--render-entry (car es) (cadr es))
-          (setq es (cdr es))))
-      (insert clerkenwell--separator)
-      (clerkenwell--protect (point-min) (point))
-      (setq clerkenwell--history-end (copy-marker (point) nil))
-      (insert draft))
+      ;; Erasing moves the history/draft marker to the start of the buffer.
+      ;; If rendering then failed before the marker was reset, the next
+      ;; rebuild would read the whole buffer back as "draft" and append it
+      ;; below the separator. So the separator, the marker and the draft are
+      ;; restored however the rendering ends.
+      (unwind-protect
+          (progn
+            (insert (propertize ";; Clerkenwell\n\n" 'face 'font-lock-comment-face))
+            (let ((es entries))
+              (while es
+                (clerkenwell--render-entry-safely (car es) (cadr es))
+                (setq es (cdr es)))))
+        (goto-char (point-max))
+        ;; The separator stays even when quiet: it is structure, not
+        ;; commentary, and without it there is no way to see where the
+        ;; editable region starts.
+        (insert clerkenwell--separator)
+        (clerkenwell--protect (point-min) (point))
+        (setq clerkenwell--history-end (copy-marker (point) nil))
+        (insert draft)))
     (goto-char (cond (point-in-draft
                       (min (point-max) (+ (clerkenwell--draft-start) point-in-draft)))
                      (point-in-history (min point-in-history (clerkenwell--draft-start)))
