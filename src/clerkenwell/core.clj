@@ -99,11 +99,20 @@
            :message (:message ev)}
 
           :value
-          (let [presentation (render/present
+          (let [cfg (merge placement/default-config config)
+                usable-w (- (:page-width cfg) (* 2 (:left-margin cfg)))
+                presentation (render/present
                               (:value ev)
-                              (cond-> (merge render/default-limits limits)
+                              (cond-> (merge render/default-limits
+                                             {:form (:ok parsed)
+                                              :right-margin (render/columns
+                                                             usable-w
+                                                             render/default-font
+                                                             render/default-font-size)}
+                                             limits)
                                 include-source? (assoc :source source)))]
-            (if (:failed? presentation)
+            (cond
+              (:failed? presentation)
               ;; Retain source and failure status; do not claim a committed
               ;; result and do not re-evaluate.
               (do (store/create-result!
@@ -113,16 +122,28 @@
                   (store/set-delivery! nb result-id :failed (name (:reason presentation)))
                   {:ok? false :stage :present :result-id result-id
                    :reason (:reason presentation)})
+
+              ;; A hidden value submitted without its source: nothing goes on
+              ;; the page, but the computation is still recorded.
+              (nil? (:tablet-text presentation))
+              (let [record (store/create-result!
+                            nb {:result-id result-id :notebook-id notebook-id
+                                :page-id page-id :source source
+                                :namespace (str namespace)
+                                :presentation presentation :asset nil})]
+                (store/set-delivery! nb result-id :skipped "hidden")
+                {:ok? true :result-id result-id :record record
+                 :presentation presentation :delivery :skipped})
+
+              :else
               ;; Persist the bounded text BEFORE rasterizing.
-              (let [cfg (merge placement/default-config config)
-                    record (store/create-result!
+              (let [record (store/create-result!
                             nb {:result-id result-id :notebook-id notebook-id
                                 :page-id page-id :source source
                                 :namespace (str namespace)
                                 :presentation presentation :asset nil})
                     tmp (io/file (System/getProperty "java.io.tmpdir")
                                  (str "ckw-" result-id ".png"))
-                    usable-w (- (:page-width cfg) (* 2 (:left-margin cfg)))
                     top (placement/output-top ink-bottom outputs-bottom cfg)
                     raster (render/rasterize presentation tmp
                                              {:max-width usable-w

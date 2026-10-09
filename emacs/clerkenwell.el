@@ -331,16 +331,17 @@ the page."
            (insert (if (clerkenwell--shows-image-p next) "\n" "\n\n")))))
       ("computation"
        (let ((src (clerkenwell--get entry :source))
-             (text (clerkenwell--get entry :text))
              (delivery (clerkenwell--get entry :delivery)))
          (insert src "\n")
-         (insert (propertize (format "%s" text) 'face 'font-lock-string-face))
+         (clerkenwell--render-presentation entry)
          ;; Delivery is mutable and shown separately from the immutable
          ;; source/result above it. Quiet mode omits it only when there is
          ;; nothing to say: anything still in flight, failed or uncertain is
          ;; always shown, since it must not look like a result on the page.
+         ;; `skipped' needs no note: the presentation already said why.
          (let ((state (clerkenwell--name delivery)))
-           (if (and clerkenwell-quiet (equal state "inserted"))
+           (if (or (equal state "skipped")
+                   (and clerkenwell-quiet (equal state "inserted")))
                (insert "\n\n")
              (insert (propertize
                       (format "   ; %s\n\n" state)
@@ -353,6 +354,20 @@ the page."
        (insert (propertize (format ";; unrecognised history entry (kind %s)\n"
                                    (if (string-empty-p other) "missing" other))
                            'face 'font-lock-warning-face))))))
+
+(defun clerkenwell--render-presentation (entry)
+  "Insert the result of computation ENTRY, drawn according to its kind.
+No trailing newline; the delivery note follows on the same line.
+A kind this buffer does not know is shown as its text, which every
+presentation carries as a fallback."
+  (let* ((pres (clerkenwell--get entry :presentation))
+         ;; Sessions older than presentations report only :text.
+         (text (or (clerkenwell--get pres :text) (clerkenwell--get entry :text))))
+    (pcase (clerkenwell--name (clerkenwell--get pres :kind))
+      ("hidden"
+       (insert (propertize ";; value hidden" 'face 'font-lock-comment-face)))
+      (_
+       (insert (propertize (format "%s" text) 'face 'font-lock-string-face))))))
 
 (defun clerkenwell--render-entry-safely (entry next)
   "Render ENTRY, or a visible warning in its place if rendering fails.
@@ -557,7 +572,8 @@ customised that variable the other way)."
            (when (= revision clerkenwell--draft-revision)
              (let ((inhibit-read-only t))
                (delete-region (clerkenwell--draft-start) (point-max))))
-           (message "Clerkenwell: %s" (clerkenwell--get result :text))
+           (message "Clerkenwell: %s" (or (clerkenwell--get result :text)
+                                          "value hidden"))
            (clerkenwell-refresh))
           (t
            (setq clerkenwell--status "rejected")

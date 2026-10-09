@@ -30,10 +30,11 @@
 (def schema-version 1)
 
 ;; Delivery states, per clerkenwell.md. `uncertain` means insertion may have
-;; happened and automatic replay is prohibited.
+;; happened and automatic replay is prohibited. `skipped` means there was
+;; nothing to put on the page: a hidden value, submitted without its source.
 (def delivery-states
   #{:queued :transferred :waiting-for-page :prepared
-    :insertion-started :inserted :failed :uncertain})
+    :insertion-started :inserted :failed :uncertain :skipped})
 
 ;; -------- atomic publication --------
 

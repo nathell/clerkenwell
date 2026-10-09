@@ -317,3 +317,26 @@ separator, header and all."
 
 (provide 'clerkenwell-test)
 ;;; clerkenwell-test.el ends here
+
+(ert-deftest clerkenwell-test-hidden-value ()
+  "A hidden value says so, and needs no delivery note to explain itself."
+  (clerkenwell-test--with-buffer
+   (let ((clerkenwell-quiet nil) (clerkenwell-show-images nil))
+     (clerkenwell--rebuild-history
+      (clerkenwell-test--entries
+       (concat "{:entries [{:kind :computation :source \"(load)\" :text nil"
+               " :presentation {:kind :hidden :text nil} :delivery :skipped}]}")))
+     (let ((text (clerkenwell-test--buffer-text)))
+       (should (string-match-p "(load)\n;; value hidden\n" text))
+       (should-not (string-match-p "skipped" text))))))
+
+(ert-deftest clerkenwell-test-presentation-text-is-shown ()
+  "Text comes from the presentation, falling back to :text for old sessions."
+  (dolist (entry '("{:kind :computation :source \"x\" :presentation {:kind :text :text \"=> 1\"} :delivery :inserted}"
+                   "{:kind :computation :source \"x\" :text \"=> 1\" :delivery :inserted}"
+                   "{:kind :computation :source \"x\" :text \"=> 1\" :presentation {:kind :chart} :delivery :inserted}"))
+    (clerkenwell-test--with-buffer
+     (let ((clerkenwell-quiet t))
+       (clerkenwell--rebuild-history
+        (clerkenwell-test--entries (format "{:entries [%s]}" entry)))
+       (should (string-match-p "^x\n=> 1$" (clerkenwell-test--buffer-text)))))))

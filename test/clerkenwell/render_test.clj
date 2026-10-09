@@ -2,7 +2,8 @@
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
-            [clerkenwell.render :as render]))
+            [clerkenwell.render :as render]
+            [scicloj.kindly.v4.kind :as kind]))
 
 (deftest ordinary-results
   (testing "the => convention is retained"
@@ -131,3 +132,89 @@
         (is (> (:height r) 200))
         (is (not (.exists (io/file tmp))) "no partial asset is left behind")))
     (.delete (io/file tmp))))
+
+;; -------- kinds --------
+
+(deftest classification-follows-kindly
+  (testing "a value marked hidden is hidden"
+    (is (= :kind/hidden (:kind (render/classify nil (kind/hidden {:a 1}))))))
+  (testing "so is one whose form is marked"
+    (is (= :kind/hidden (:kind (render/classify (with-meta '(foo) {:kind/hidden true})
+                                                {:a 1})))))
+  (testing "a value that cannot carry metadata is unwrapped"
+    (let [c (render/classify nil (kind/pprint 42))]
+      (is (= :kind/pprint (:kind c)))
+      (is (= 42 (:value c)))))
+  (testing "as in Clay, definitions and setup are hidden"
+    (doseq [form '[(def x 1) (defn f []) (defn- g []) (require 'foo) (ns foo)]]
+      (is (= :kind/hidden (:kind (render/classify form #'clojure.core/map))) (pr-str form))))
+  (testing "matched on the symbol as written, so a qualified or custom definer shows"
+    (doseq [form '[(clojure.core/def x 1) (s/defn f [])]]
+      (is (not= :kind/hidden (:kind (render/classify form #'clojure.core/map))) (pr-str form))))
+  (testing "a notebook can choose its own set"
+    (is (not= :kind/hidden
+              (:kind (render/classify (with-meta '(def x 1)
+                                        {:kindly/options {:hide-value-syms #{}}})
+                                      #'clojure.core/map)))))
+  (testing "the form is never evaluated again, even when the value is nil"
+    (let [calls (atom 0)]
+      (intern 'user 'ckw-classify-calls calls)
+      (render/classify '(swap! user/ckw-classify-calls inc) nil)
+      (is (= 0 @calls)))))
+
+(deftest hidden-values
+  (testing "without the source, nothing at all is meant for the page"
+    (let [p (render/present (kind/hidden {:a 1}))]
+      (is (= :hidden (:kind p)))
+      (is (nil? (:tablet-text p)))
+      (is (nil? (:text p)))))
+  (testing "with the source, the source alone goes on the page"
+    (let [p (render/present (kind/hidden {:a 1})
+                            (assoc render/default-limits :source "(load-data)"))]
+      (is (= :hidden (:kind p)))
+      (is (= "(load-data)" (:tablet-text p))))))
+
+(deftest unsupported-kinds-fall-back-to-text
+  (let [p (render/present (kind/md "# Hello"))]
+    (is (= :text (:kind p)))
+    (is (= :kind/md (:kindly-kind p)) "remembered, for when it is supported")
+    (is (= "=> \"# Hello\"" (:text p)))))
+
+(deftest code-is-shown-as-written
+  (is (= "(defn f [x]\n  x)" (:text (render/present (kind/code "(defn f [x]\n  x)"))))))
+
+(deftest a-broken-advisor-does-not-cost-the-result
+  (with-redefs [scicloj.kindly-advice.v1.api/advise (fn [_] (throw (Exception. "bad advisor")))]
+    (let [p (render/present 3)]
+      (is (not (:failed? p)))
+      (is (= "=> 3" (:text p))))))
+
+;; -------- pretty-printing --------
+
+(defrecord Point [x y])
+
+(deftest pretty-printing
+  (let [limits (assoc render/default-limits :right-margin 30)
+        big {:alpha (range 10) :beta "a fairly long string" :gamma {:delta 1}}]
+    (testing "what fits on a line prints exactly as pr-str"
+      (is (= "=> {:a 1, :b 2}" (:text (render/present {:a 1 :b 2} limits))))
+      (is (= (str "=> " (pr-str (->Point 1 2)))
+             (:text (render/present (->Point 1 2)
+                                    (assoc limits :right-margin 64))))))
+    (testing "what does not is pretty-printed within the margin"
+      (let [lines (str/split-lines (:text (render/present big limits)))]
+        (is (> (count lines) 1))
+        (is (every? #(<= (count %) 30) lines))
+        (testing "with continuation lines aligned under the value"
+          (is (every? #(str/starts-with? % "   ") (rest lines))))))
+    (testing "plain values fill their lines rather than taking one each"
+      (let [lines (str/split-lines (:text (render/present (vec (range 40)) limits)))]
+        (is (< 1 (count lines) 10))
+        (is (every? #(<= (count %) 30) lines))))
+    (testing "even when there are infinitely many of them"
+      (let [lines (str/split-lines (:text (render/present (range) limits)))]
+        (is (< (count lines) 20))
+        (is (str/ends-with? (last lines) "...)"))))
+    (testing "a record keeps its tag when pretty-printed"
+      (is (str/starts-with? (:text (render/present (->Point big big) limits))
+                            "=> #clerkenwell.render_test.Point{")))))

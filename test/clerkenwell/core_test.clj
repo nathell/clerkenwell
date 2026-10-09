@@ -62,6 +62,38 @@
         (is (:ok? r) (str src " should commit"))
         (is (= expected (get-in r [:presentation :text])))))))
 
+(deftest a-hidden-value-is-recorded-but-not-sent
+  (let [root (tmp-root)
+        nb (store/notebook-dir root "nb-1")]
+    (testing "without its source, nothing is drawn or queued"
+      (let [r (core/submit! {:state-root root :notebook-id "nb-1" :page-id "page-1"
+                             :source "(scicloj.kindly.v4.kind/hidden {:a 1})"
+                             :namespace "user" :ink-bottom nil :outputs-bottom nil})]
+        (is (:ok? r))
+        (is (= :skipped (:delivery r)))
+        (is (nil? (:asset r)))
+        (is (= :hidden (get-in (store/read-manifest nb) [(:result-id r) :presentation :kind])))
+        (is (= :skipped (get-in (store/read-manifest nb) [(:result-id r) :delivery :state])))))
+    (testing "with its source, the source alone is sent"
+      (let [r (core/submit! {:state-root root :notebook-id "nb-1" :page-id "page-1"
+                             :source "^:kind/hidden {:a 1}"
+                             :namespace "user" :ink-bottom nil :outputs-bottom nil
+                             :include-source? true})]
+        (is (:ok? r))
+        (is (some? (:asset r)))
+        (is (= "^:kind/hidden {:a 1}" (get-in r [:presentation :tablet-text])))))))
+
+(deftest long-values-are-pretty-printed-to-the-page-width
+  (let [root (tmp-root)
+        r (core/submit! {:state-root root :notebook-id "nb-1" :page-id "page-1"
+                         :source "(vec (range 1000 1080))"
+                         :namespace "user" :ink-bottom nil :outputs-bottom nil})
+        lines (clojure.string/split-lines (get-in r [:presentation :text]))]
+    (is (:ok? r))
+    (is (> (count lines) 1))
+    (is (< 50 (apply max (map count lines)) 65)
+        "wrapped to what fits the usable page width, not pprint's default 72")))
+
 (deftest infinite-sequence-is-bounded
   (let [root (tmp-root)
         r (core/submit! {:state-root root :notebook-id "nb-1" :page-id "page-1"

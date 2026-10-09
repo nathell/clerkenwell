@@ -240,12 +240,14 @@
                  ;; background: a transfer failure is never a reason to evaluate
                  ;; again, and waiting on SSH would block the editor.
                  (do
-                   (deliver-async! nb (:result-id r) (:ssh-host s))
+                   ;; A hidden value without its source has nothing to send.
+                   (when-not (= :skipped (:delivery r))
+                     (deliver-async! nb (:result-id r) (:ssh-host s)))
                    (assoc r
                           :text (get-in r [:presentation :text])
                           :page-id page
                           :notebook-id doc
-                          :delivery :queued))))))
+                          :delivery (or (:delivery r) :queued)))))))
          (finally (reset! evaluating false)))))))
 
 ;; -------- delivery, without evaluating again --------
@@ -368,6 +370,9 @@
                  :sequence (:sequence ev)
                  :id (:id ev)
                  :source (:source r)
+                 ;; The whole presentation, which the buffer draws by kind.
+                 ;; :text stays for buffers older than that.
+                 :presentation (:presentation r)
                  :text (get-in r [:presentation :text])
                  :namespace (:namespace r)
                  :page-id (:page-id r)

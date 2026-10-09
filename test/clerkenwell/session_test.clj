@@ -135,6 +135,21 @@
         (is (= "(+ 1 2)\n=> 3" (get-in r [:presentation :tablet-text])))
         (is (= "=> 3" (:text r)) "Emacs still shows the result alone")))))
 
+(deftest hidden-values-reach-history-but-not-the-device
+  (let [root (str (tmp-root))]
+    (session/start! {:state-root root :ssh-host "no-host" :port port})
+    (report-identity!)
+    (let [delivered (atom 0)]
+      (with-redefs [transport/push-asset! (fn [& _] (swap! delivered inc))]
+        (let [r (session/submit "^:kind/hidden (+ 1 2)" "user")]
+          (is (:ok? r))
+          (is (= :skipped (:delivery r)))
+          (Thread/sleep 100)
+          (is (= 0 @delivered) "nothing to push"))))
+    (let [e (last (:entries (session/history)))]
+      (is (= :hidden (get-in e [:presentation :kind])))
+      (is (= :skipped (:delivery e))))))
+
 (deftest history-interleaves-ink-and-computation
   (let [root (str (tmp-root))
         nb (store/notebook-dir root doc)
