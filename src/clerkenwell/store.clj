@@ -121,13 +121,21 @@
            (reduce max 0)
            inc))))
 
+(def ^:private append-lock
+  "Serialises appends within this JVM. Choosing the next sequence and
+   publishing it is a read-then-write, and the watcher, evaluation and delivery
+   all append from their own threads: two of them racing would take the same
+   number, and the later rename would silently replace the earlier event."
+  (Object.))
+
 (defn append-event!
   "Append one event and return it with its assigned :sequence."
   [nb event]
-  (let [n (next-sequence nb)
-        ev (assoc event :sequence n :at (str (java.time.Instant/now)))]
-    (publish! (io/file (events-dir nb) (str n ".edn")) (pr-str ev))
-    ev))
+  (locking append-lock
+    (let [n (next-sequence nb)
+          ev (assoc event :sequence n :at (str (java.time.Instant/now)))]
+      (publish! (io/file (events-dir nb) (str n ".edn")) (pr-str ev))
+      ev)))
 
 ;; -------- manifest (derived) --------
 
