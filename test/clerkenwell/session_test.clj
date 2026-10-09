@@ -150,6 +150,19 @@
       (is (= :hidden (get-in e [:presentation :kind])))
       (is (= :skipped (:delivery e))))))
 
+(deftest image-results-reach-history-with-their-file
+  (let [root (str (tmp-root))]
+    (session/start! {:state-root root :ssh-host "no-host" :port port})
+    (report-identity!)
+    (with-redefs [transport/push-asset! (fn [& _])]
+      (let [r (session/submit "(java.awt.image.BufferedImage. 2000 100 java.awt.image.BufferedImage/TYPE_INT_RGB)" "user")]
+        (is (:ok? r) (pr-str (dissoc r :record)))))
+    (let [e (last (:entries (session/history)))]
+      (is (= :image (get-in e [:presentation :kind])))
+      (is (.exists (io/file (:image e))))
+      (is (.isAbsolute (io/file (:image e))))
+      (is (= 1284 (:page-width e)) "as wide as the page allows, not the stored 1404"))))
+
 (deftest history-interleaves-ink-and-computation
   (let [root (str (tmp-root))
         nb (store/notebook-dir root doc)

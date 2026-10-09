@@ -274,17 +274,28 @@ make Emacs wrap it."
   "Pixels to show an image PAGE-WIDTH page units wide at, within AVAILABLE."
   (max 1 (min (round (* page-width clerkenwell-image-scale)) available)))
 
-(defun clerkenwell--image-problem (entry)
-  "Why handwriting ENTRY cannot be shown as an image, or nil if it can.
+(defun clerkenwell--file-image-problem (file)
+  "Why image FILE cannot be shown, or nil if it can.
 Also nil when images are turned off, which is a choice, not a problem."
-  (let ((asset (clerkenwell--get entry :asset)))
-    (cond
-     ((not clerkenwell-show-images) nil)
-     ((not (display-graphic-p)) "no graphics in this frame")
-     ((not (display-images-p)) "images unsupported")
-     ((null asset) "no asset recorded")
-     ((not (file-readable-p asset))
-      (format "unreadable: %s" asset)))))
+  (cond
+   ((not clerkenwell-show-images) nil)
+   ((not (display-graphic-p)) "no graphics in this frame")
+   ((not (display-images-p)) "images unsupported")
+   ((null file) "no asset recorded")
+   ((not (file-readable-p file))
+    (format "unreadable: %s" file))))
+
+(defun clerkenwell--image-problem (entry)
+  "Why handwriting ENTRY cannot be shown as an image, or nil if it can."
+  (clerkenwell--file-image-problem (clerkenwell--get entry :asset)))
+
+(defun clerkenwell--insert-sized-image (file page-width)
+  "Insert image FILE, PAGE-WIDTH page units wide, scaled for this buffer."
+  (insert-image
+   (create-image file nil nil
+                 :width (clerkenwell--image-width
+                         page-width (or clerkenwell--rendered-width
+                                        (clerkenwell--available-width))))))
 
 (defun clerkenwell--shows-image-p (entry)
   "Whether ENTRY is rendered as an image."
@@ -319,15 +330,12 @@ the page."
          (if (or problem (not clerkenwell-show-images))
              (insert "\n")
            (let ((pw (clerkenwell--get entry :page-width)))
-             (insert-image
-              (if pw
-                  (create-image asset nil nil
-                                :width (clerkenwell--image-width
-                                        pw (or clerkenwell--rendered-width
-                                               (clerkenwell--available-width))))
-                ;; A session older than this buffer, which does not report
-                ;; sizes: assume the image was drawn at page resolution.
-                (create-image asset nil nil :scale clerkenwell-image-scale))))
+             (if pw
+                 (clerkenwell--insert-sized-image asset pw)
+               ;; A session older than this buffer, which does not report
+               ;; sizes: assume the image was drawn at page resolution.
+               (insert-image (create-image asset nil nil
+                                           :scale clerkenwell-image-scale))))
            (insert (if (clerkenwell--shows-image-p next) "\n" "\n\n")))))
       ("computation"
        (let ((src (clerkenwell--get entry :source))
@@ -366,6 +374,19 @@ presentation carries as a fallback."
     (pcase (clerkenwell--name (clerkenwell--get pres :kind))
       ("hidden"
        (insert (propertize ";; value hidden" 'face 'font-lock-comment-face)))
+      ("image"
+       (let* ((file (clerkenwell--get entry :image))
+              (problem (or (clerkenwell--file-image-problem file)
+                           (and (not (clerkenwell--get entry :page-width))
+                                "no size recorded"))))
+         (if (and clerkenwell-show-images (not problem))
+             (clerkenwell--insert-sized-image
+              file (clerkenwell--get entry :page-width))
+           ;; As text, saying why when it is not by choice.
+           (insert (propertize (format "%s" text) 'face 'font-lock-string-face))
+           (when (and clerkenwell-show-images problem)
+             (insert (propertize (format " [%s]" problem)
+                                 'face 'font-lock-warning-face))))))
       (_
        (insert (propertize (format "%s" text) 'face 'font-lock-string-face))))))
 

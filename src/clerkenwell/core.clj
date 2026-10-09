@@ -73,6 +73,17 @@
 
 ;; -------- submission --------
 
+(defn- persist-image!
+  "An image presentation carries its bytes only as far as here: they are
+   written as the result's image before the record that points at them, so a
+   record never names a file that is not there."
+  [nb result-id presentation]
+  (if-let [bs (:png-bytes presentation)]
+    (let [rel (str "results/" result-id "/image.png")]
+      (store/publish-bytes! (io/file nb rel) bs)
+      (-> presentation (dissoc :png-bytes) (assoc :image rel)))
+    presentation))
+
 (defn submit!
   "Capture, evaluate once, present, persist and queue for delivery.
 
@@ -125,7 +136,8 @@
 
               ;; A hidden value submitted without its source: nothing goes on
               ;; the page, but the computation is still recorded.
-              (nil? (:tablet-text presentation))
+              (and (= :hidden (:kind presentation))
+                   (nil? (:tablet-text presentation)))
               (let [record (store/create-result!
                             nb {:result-id result-id :notebook-id notebook-id
                                 :page-id page-id :source source
@@ -137,7 +149,8 @@
 
               :else
               ;; Persist the bounded text BEFORE rasterizing.
-              (let [record (store/create-result!
+              (let [presentation (persist-image! nb result-id presentation)
+                    record (store/create-result!
                             nb {:result-id result-id :notebook-id notebook-id
                                 :page-id page-id :source source
                                 :namespace (str namespace)
@@ -146,7 +159,8 @@
                                  (str "ckw-" result-id ".png"))
                     top (placement/output-top ink-bottom outputs-bottom cfg)
                     raster (render/rasterize presentation tmp
-                                             {:max-width usable-w
+                                             {:base-dir nb
+                                              :max-width usable-w
                                               :max-height (- (:page-height cfg)
                                                              top (:bottom-margin cfg))})]
                 (if-not (:ok? raster)

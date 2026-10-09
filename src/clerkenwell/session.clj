@@ -15,11 +15,18 @@
             [clojure.string :as str]
             [clerkenwell.core :as core]
             [clerkenwell.ink :as ink]
+            [clerkenwell.placement :as placement]
             [clerkenwell.store :as store]
             [clerkenwell.transport :as transport]
             [clerkenwell.watch :as watch]))
 
 (defonce ^:private session (atom nil))
+
+(defn- usable-width
+  "Page units between the margins, the widest a result can be."
+  []
+  (let [{:keys [page-width left-margin]} placement/default-config]
+    (- page-width (* 2 left-margin))))
 
 ;; Rejects a second submission while one is in flight. Delivery of an earlier
 ;; result does NOT block a later evaluation; only evaluation is serialized.
@@ -373,6 +380,13 @@
                  ;; The whole presentation, which the buffer draws by kind.
                  ;; :text stays for buffers older than that.
                  :presentation (:presentation r)
+                 ;; An image result, as the page shows it: the buffer sizes
+                 ;; it from its width on the page, in page units.
+                 :image (some->> (get-in r [:presentation :image])
+                                 (io/file nb) (.getAbsolutePath))
+                 :page-width (when (get-in r [:presentation :image])
+                               (min (get-in r [:presentation :width])
+                                    (usable-width)))
                  :text (get-in r [:presentation :text])
                  :namespace (:namespace r)
                  :page-id (:page-id r)

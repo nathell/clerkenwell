@@ -218,3 +218,97 @@
     (testing "a record keeps its tag when pretty-printed"
       (is (str/starts-with? (:text (render/present (->Point big big) limits))
                             "=> #clerkenwell.render_test.Point{")))))
+
+;; -------- images --------
+
+(defn- test-image
+  "A `w` x `h` image: transparent, with an opaque red square at the top left."
+  [w h]
+  (let [img (java.awt.image.BufferedImage. w h java.awt.image.BufferedImage/TYPE_INT_ARGB)
+        g (.createGraphics img)]
+    (.setColor g java.awt.Color/red)
+    (.fillRect g 0 0 (quot w 4) (quot h 4))
+    (.dispose g)
+    img))
+
+(defn- decode [^bytes bs]
+  (javax.imageio.ImageIO/read (java.io.ByteArrayInputStream. bs)))
+
+(defn- gray-at [img x y] (bit-and 0xff (.getRGB img x y)))
+
+(deftest image-presentation
+  (testing "a BufferedImage is an image, as the page will show it"
+    (let [p (render/present (test-image 400 200))
+          img (decode (:png-bytes p))]
+      (is (= :image (:kind p)))
+      (is (= [400 200] [(:width p) (:height p)]) "small enough: unchanged")
+      (is (= "=> #<image 400×200>" (:text p)))
+      (is (nil? (:tablet-text p)) "no source, so nothing but the image")
+      (testing "flattened onto white, in grayscale"
+        (is (= java.awt.image.BufferedImage/TYPE_BYTE_GRAY (.getType img)))
+        (is (= 255 (gray-at img 300 150)) "transparent became white")
+        (is (< (gray-at img 10 10) 255) "red became a gray"))))
+  (testing "a larger one is reduced to the page, keeping its proportions"
+    (let [p (render/present (test-image 2808 936))]
+      (is (= [1404 468] [(:width p) (:height p)]))
+      (is (= "=> #<image 2808×936>" (:text p)) "the text tells the real size")))
+  (testing "kind/image on an image works too"
+    (is (= :image (:kind (render/present (kind/image (test-image 10 10)))))))
+  (testing "an image file marked as one is read, as Plotje's save returns"
+    (let [f (java.io.File/createTempFile "ckw-img" ".png")]
+      (javax.imageio.ImageIO/write (test-image 30 20) "png" f)
+      (is (= :image (:kind (render/present (kind/image f)))))
+      (is (= :text (:kind (render/present f))) "unmarked, a file is just a file")
+      (.delete f)))
+  (testing "a file that is no image after all is printed"
+    (let [f (java.io.File/createTempFile "ckw-img" ".txt")]
+      (spit f "not an image")
+      (is (= :text (:kind (render/present (kind/image f)))))
+      (.delete f)))
+  (testing "an enormous image is described, not decoded"
+    (with-redefs [render/max-image-pixels 100]
+      (let [p (render/present (test-image 40 30))]
+        (is (= :text (:kind p)))
+        (is (= "=> #<image 40×30, too large to show>" (:text p))))))
+  (testing "with the source, it goes above the image"
+    (is (= "(draw)" (:tablet-text (render/present (test-image 10 10)
+                                                  (assoc render/default-limits
+                                                         :source "(draw)")))))))
+
+(deftest image-rasterization
+  (let [dir (doto (io/file (System/getProperty "java.io.tmpdir") (str "ckw-ri-" (random-uuid)))
+              (.mkdirs))
+        out (io/file dir "out.png")
+        stored (fn [w h & [src]]
+                 (let [p (render/present (test-image w h)
+                                         (cond-> render/default-limits src (assoc :source src)))]
+                   (io/copy (:png-bytes p) (io/file dir "image.png"))
+                   (-> p (dissoc :png-bytes) (assoc :image "image.png"))))]
+    (testing "an image that fits is drawn as it is"
+      (let [r (render/rasterize (stored 300 200) out {:base-dir dir :max-width 1284 :max-height 1800})]
+        (is (:ok? r))
+        (is (= [300 200] [(:width r) (:height r)]))))
+    (testing "a wider one is scaled down to the width"
+      (let [r (render/rasterize (stored 1404 702) out {:base-dir dir :max-width 1284 :max-height 1800})]
+        (is (= [1284 642] [(:width r) (:height r)]))))
+    (testing "and to the room left on the page"
+      (let [r (render/rasterize (stored 600 600) out {:base-dir dir :max-width 1284 :max-height 300})]
+        (is (= [300 300] [(:width r) (:height r)]))))
+    (testing "the source sits above, and counts against the room"
+      (let [r (render/rasterize (stored 300 200 "(draw)") out
+                                {:base-dir dir :max-width 1284 :max-height 1800})]
+        (is (:ok? r))
+        (is (> (:height r) 250))
+        (is (= 300 (:width r)))))
+    (testing "squeezing it below legibility is refused, not done"
+      (let [r (render/rasterize (stored 600 600) out {:base-dir dir :max-width 1284 :max-height 60})]
+        (is (false? (:ok? r)))
+        (is (= :insufficient-space (:reason r)))
+        (is (not (.exists out)))))
+    (testing "a wide, short image narrowed to the width is not squeezed"
+      (let [r (render/rasterize (stored 1404 70) out {:base-dir dir :max-width 1284 :max-height 1800})]
+        (is (:ok? r))
+        (is (= [1284 64] [(:width r) (:height r)]))))
+    (testing "an image shorter than that limit only needs its own height"
+      (let [r (render/rasterize (stored 200 50) out {:base-dir dir :max-width 1284 :max-height 60})]
+        (is (:ok? r))))))

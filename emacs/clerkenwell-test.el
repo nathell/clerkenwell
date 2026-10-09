@@ -340,3 +340,23 @@ separator, header and all."
        (clerkenwell--rebuild-history
         (clerkenwell-test--entries (format "{:entries [%s]}" entry)))
        (should (string-match-p "^x\n=> 1$" (clerkenwell-test--buffer-text)))))))
+
+(ert-deftest clerkenwell-test-image-result ()
+  "An image result is shown as an image, or as its text saying why not."
+  (let ((file (make-temp-file "ckw-img" nil ".png")))
+    (clerkenwell-test--with-images
+     (clerkenwell-test--with-buffer
+      (let ((clerkenwell-quiet t) (clerkenwell-show-images t))
+        (clerkenwell--rebuild-history
+         (clerkenwell-test--entries
+          (format "{:entries [{:kind :computation :source \"(draw)\" :text \"=> #<image 2×2>\" :presentation {:kind :image :text \"=> #<image 2×2>\"} :image %S :page-width 2 :delivery :inserted}]}" file)))
+        (should (string-match-p "^(draw)\n\\[img\\]$" (clerkenwell-test--buffer-text))))))
+    (clerkenwell-test--with-images
+     (clerkenwell-test--with-buffer
+      (let ((clerkenwell-quiet t) (clerkenwell-show-images t))
+        (clerkenwell--rebuild-history
+         (clerkenwell-test--entries
+          "{:entries [{:kind :computation :source \"(draw)\" :text \"=> #<image 2×2>\" :presentation {:kind :image :text \"=> #<image 2×2>\"} :image \"/nonexistent.png\" :page-width 2 :delivery :inserted}]}"))
+        (let ((text (clerkenwell-test--buffer-text)))
+          (should (string-match-p "=> #<image 2×2> \\[unreadable: /nonexistent.png\\]" text))))))
+    (delete-file file)))

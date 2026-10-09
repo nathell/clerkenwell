@@ -218,6 +218,40 @@
     (str (subs s 0 max-chars) truncation-marker)
     s))
 
+;; -------- images --------
+
+(def max-image-pixels
+  "Images larger than this are not decoded at all. Far beyond anything the
+   page can show, and a bound on the memory one result can take."
+  50000000)
+
+(defn- capture-image
+  "`value` -- a BufferedImage, or a file holding an image, as Plotje's `save`
+   returns -- as it will appear: grayscale on white, no larger than the page.
+   Returns {:png-bytes :width :height :original [w h]}, {:image-problem text}
+   when it cannot be shown, or nil when it is not an image after all and should
+   be printed."
+  [value]
+  (let [too-large (fn [w h] {:image-problem (str "=> #<image " w "×" h
+                                                 ", too large to show>")})
+        img (cond
+              (instance? BufferedImage value) value
+              (instance? java.io.File value)
+              (let [[w h] (image/file-dimensions value)]
+                (cond (nil? w) nil
+                      (> (* (long w) h) max-image-pixels) (too-large w h)
+                      :else (javax.imageio.ImageIO/read ^java.io.File value))))]
+    (if-not (instance? BufferedImage img)
+      img
+      (let [w (.getWidth ^BufferedImage img) h (.getHeight ^BufferedImage img)]
+        (if (> (* (long w) h) max-image-pixels)
+          (too-large w h)
+          (let [[tw th] (image/fit w h page-width page-height)
+                out (image/scale img tw th)]
+            {:png-bytes (image/png-bytes out)
+             :width tw :height th
+             :original [w h]}))))))
+
 (defn present
   "Bound `value` into a presentation map, the thing persisted before anything is
    drawn:
@@ -246,13 +280,17 @@
               ;; is simply printed.
               (let [{:keys [kind value]} (try (classify form value)
                                               (catch Exception _ {:value value}))]
-                {:kindly-kind kind
-                 :printed (when-not (= kind :kind/hidden)
-                            (binding [*print-level* print-level
-                                      *print-length* print-length]
-                              (if (and (= kind :kind/code) (string? value))
-                                value
-                                (print-value value right-margin))))}))
+                (merge
+                 {:kindly-kind kind}
+                 ;; Encoded here, on the bounded thread: decoding a file and
+                 ;; scaling a large image take real time.
+                 (when (= kind :kind/image) (capture-image value))
+                 (when-not (= kind :kind/hidden)
+                   {:printed (binding [*print-level* print-level
+                                       *print-length* print-length]
+                               (cond
+                                 (and (= kind :kind/code) (string? value)) value
+                                 :else (print-value value right-margin)))}))))
             timeout-ms)
          ;; The source is bounded too: a long draft must not produce an image
          ;; that cannot fit the page.
@@ -275,8 +313,22 @@
         :truncated? false
         :kindly-kind :kind/hidden}
 
+       (get-in r [:ok :png-bytes])
+       (let [{:keys [png-bytes width height original]} (:ok r)]
+         {:kind :image
+          ;; The image bytes ride along only until the caller persists them as
+          ;; a file and replaces them with its path, before the record is made.
+          :png-bytes png-bytes
+          :width width :height height
+          :text (str "=> #<image " (first original) "×" (second original) ">")
+          ;; Only the source: the image itself is drawn beneath it.
+          :tablet-text src
+          :truncated? false
+          :kindly-kind :kind/image})
+
        :else
        (let [{:keys [printed kindly-kind]} (:ok r)
+             printed (or (get-in r [:ok :image-problem]) printed)
              result-text (cap printed max-chars)]
          {:kind :text
           ;; What Emacs shows: the result alone.
@@ -337,36 +389,22 @@
         (when (>= x1 0)
           [x0 y0 (inc (- x1 x0)) (inc (- y1 y0))])))))
 
-(defn rasterize
-  "Render `presentation`'s text to a PNG at `out-path`.
-
-   Long lines word-wrap within :max-width, so results wrap rather than run off
-   the page, and the image is trimmed tight around the glyphs.
-
-   Returns {:ok? true :path :width :height} or, when the result does not fit the
-   supported page area, {:ok? false :reason :insufficient-space ...}. It never
-   silently crops or shrinks -- the caller keeps the result pending instead."
-  [presentation out-path {:keys [max-width max-height font font-size]
-                          :or {font default-font font-size default-font-size}}]
-  (let [max-width (min (or max-width page-width) page-width)
-        max-height (min (or max-height page-height) page-height)
-        out (io/file out-path)
-        fnt (load-font font font-size)
+(defn- text-image
+  "`text` drawn in black on white, word-wrapped within `max-width` and trimmed
+   tight around the glyphs. Returns {:image img} or, when it would be taller
+   than `max-height`, {:refused {:width :height}}."
+  [text {:keys [max-width max-height font font-size]}]
+  (let [fnt (load-font font font-size)
         [_ ^Graphics2D pg] (image/canvas 1 1 BufferedImage/TYPE_BYTE_GRAY Color/white)
         fm (.getFontMetrics pg fnt)
         _ (.dispose pg)
-        text (or (:tablet-text presentation) (:text presentation))
         lines (->> (str/split-lines text)
                    (mapcat #(wrap-line fm max-width %))
                    ;; Blank edge lines would be trimmed away anyway.
                    (drop-while str/blank?) reverse (drop-while str/blank?) reverse
                    vec)
         lh (.getHeight fm)
-        refuse (fn [w h]
-                 (.delete out)
-                 {:ok? false :reason :insufficient-space
-                  :width w :height h
-                  :max-width max-width :max-height max-height})]
+        refuse (fn [w h] {:refused {:width w :height h}})]
     (cond
       (empty? lines) (refuse 0 0)
       ;; The first and last lines carry ink, so the trimmed image is at least
@@ -388,6 +426,70 @@
             (nil? x) (refuse 0 0)               ; only invisible characters
             (> h max-height) (refuse w h)
             :else
-            {:ok? true
-             :path (image/write-png! (.getSubimage ^BufferedImage img x y w h) out)
-             :width w :height h}))))))
+            {:image (.getSubimage ^BufferedImage img x y w h)}))))))
+
+(def ^:private source-gap
+  "Pixels between the source and an image drawn beneath it."
+  16)
+
+(def ^:private min-image-height
+  "An image is shrunk to fit the room left on the page, but not below this
+   height (or its own, if smaller): past that it is unreadable, and the
+   result is better refused, so it stays pending, than squeezed."
+  100)
+
+(defn rasterize
+  "Render `presentation` to a PNG at `out-path`.
+
+   Text word-wraps within :max-width, so results wrap rather than run off the
+   page, and is trimmed tight around the glyphs; it is never shrunk. An image
+   (read from :image, relative to :base-dir) is scaled down to the room left,
+   beneath its source if that is to go on the page too.
+
+   Returns {:ok? true :path :width :height} or, when the result does not fit the
+   supported page area, {:ok? false :reason :insufficient-space ...}. Rather than
+   squeeze it, the caller keeps the result pending."
+  [presentation out-path {:keys [max-width max-height font font-size base-dir]
+                          :or {font default-font font-size default-font-size}}]
+  (let [max-width (min (or max-width page-width) page-width)
+        max-height (min (or max-height page-height) page-height)
+        opts {:max-width max-width :max-height max-height
+              :font font :font-size font-size}
+        out (io/file out-path)
+        refuse (fn [{:keys [width height]}]
+                 (.delete out)
+                 {:ok? false :reason :insufficient-space
+                  :width width :height height
+                  :max-width max-width :max-height max-height})
+        done (fn [^BufferedImage img]
+               {:ok? true :path (image/write-png! img out)
+                :width (.getWidth img) :height (.getHeight img)})
+        text (or (:tablet-text presentation) (:text presentation))]
+    (if (not= :image (:kind presentation))
+      (let [{:keys [image refused]} (text-image text opts)]
+        (if refused (refuse refused) (done image)))
+      (let [src (when-let [t (:tablet-text presentation)] (text-image t opts))
+            ^BufferedImage src-img (:image src)
+            above (if src-img (+ (.getHeight src-img) source-gap) 0)
+            ^BufferedImage img (javax.imageio.ImageIO/read
+                                (io/file base-dir (:image presentation)))
+            w (.getWidth img) h (.getHeight img)
+            room (- max-height above)
+            ;; Fitting the width is always fine; only shrinking further for
+            ;; want of height can make an image too small to read.
+            [_ wide-h] (image/fit w h max-width Long/MAX_VALUE)
+            [tw th] (image/fit w h max-width (max 1 room))]
+        (cond
+          (:refused src) (refuse (:refused src))
+          (and (< room wide-h) (< room (min wide-h min-image-height)))
+          (refuse {:width w :height (+ above wide-h)})
+          :else
+          (let [cw (max tw (if src-img (.getWidth src-img) 0))
+                [canvas ^Graphics2D g] (image/canvas cw (+ above th)
+                                                     BufferedImage/TYPE_BYTE_GRAY
+                                                     Color/white)]
+            (try
+              (when src-img (.drawImage g src-img 0 0 nil))
+              (.drawImage g (image/scale img tw th) 0 (int above) nil)
+              (finally (.dispose g)))
+            (done canvas)))))))

@@ -94,6 +94,21 @@
     (is (< 50 (apply max (map count lines)) 65)
         "wrapped to what fits the usable page width, not pprint's default 72")))
 
+(deftest an-image-is-kept-and-drawn
+  (let [root (tmp-root)
+        nb (store/notebook-dir root "nb-1")
+        r (core/submit! {:state-root root :notebook-id "nb-1" :page-id "page-1"
+                         :source "(java.awt.image.BufferedImage. 200 100 java.awt.image.BufferedImage/TYPE_INT_RGB)"
+                         :namespace "user" :ink-bottom nil :outputs-bottom nil})
+        rec (get (store/read-manifest nb) (:result-id r))]
+    (is (:ok? r))
+    (is (= :image (get-in rec [:presentation :kind])))
+    (testing "its bytes are a file before the record names it, and not in the record"
+      (is (.exists (io/file nb (get-in rec [:presentation :image]))))
+      (is (not (contains? (:presentation rec) :png-bytes))))
+    (testing "and it is drawn for the page"
+      (is (= [200 100] [(get-in r [:asset :width]) (get-in r [:asset :height])])))))
+
 (deftest infinite-sequence-is-bounded
   (let [root (tmp-root)
         r (core/submit! {:state-root root :notebook-id "nb-1" :page-id "page-1"

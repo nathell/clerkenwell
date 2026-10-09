@@ -54,6 +54,56 @@
       (.fillRect 0 0 (int w) (int h)))
     [img g]))
 
+(defn scale
+  "`img` resized to `w` x `h` as a grayscale image on white: transparency is
+   flattened, since the page has none. A large reduction is made in halving
+   steps, which a single bilinear pass would alias badly."
+  ^BufferedImage [^BufferedImage img w h]
+  (loop [^BufferedImage src img]
+    (let [sw (.getWidth src) sh (.getHeight src)
+          ;; Halve while still more than twice the target; then one last step.
+          nw (if (> sw (* 2 w)) (quot sw 2) w)
+          nh (if (> sh (* 2 h)) (quot sh 2) h)
+          [^BufferedImage out ^Graphics2D g]
+          (canvas nw nh BufferedImage/TYPE_BYTE_GRAY Color/white)]
+      (try
+        (.setRenderingHint g RenderingHints/KEY_INTERPOLATION
+                           RenderingHints/VALUE_INTERPOLATION_BILINEAR)
+        (.setRenderingHint g RenderingHints/KEY_RENDERING
+                           RenderingHints/VALUE_RENDER_QUALITY)
+        (.drawImage g src 0 0 (int nw) (int nh) nil)
+        (finally (.dispose g)))
+      (if (and (= nw w) (= nh h)) out (recur out)))))
+
+(defn fit
+  "The size `w` x `h` scaled down, never up, to fit `max-w` x `max-h`,
+   keeping its proportions, as [w h]."
+  [w h max-w max-h]
+  (let [k (min 1.0 (/ (double max-w) w) (/ (double max-h) h))]
+    [(max 1 (Math/round (* k w))) (max 1 (Math/round (* k h)))]))
+
+(defn file-dimensions
+  "[w h] of the image in file `f`, read from its header without decoding the
+   pixels, or nil if no reader recognises it."
+  [f]
+  (with-open [in (ImageIO/createImageInputStream (io/file f))]
+    (when in
+      (let [readers (ImageIO/getImageReaders in)]
+        (when (.hasNext readers)
+          (let [^javax.imageio.ImageReader r (.next readers)]
+            (try
+              (.setInput r in)
+              [(.getWidth r 0) (.getHeight r 0)]
+              (finally (.dispose r)))))))))
+
+(defn png-bytes
+  "`img` encoded as PNG."
+  ^bytes [^BufferedImage img]
+  (let [out (java.io.ByteArrayOutputStream.)]
+    (when-not (ImageIO/write img "png" out)
+      (throw (ex-info "No PNG writer available" {})))
+    (.toByteArray out)))
+
 (defn write-png!
   "Write `img` to `out` as a PNG, creating parent directories."
   [^BufferedImage img out]
