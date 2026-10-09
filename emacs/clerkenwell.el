@@ -80,7 +80,7 @@ submission when given a prefix argument."
 These images are shown in Emacs and never sent to the device, so they
 follow the editor's theme rather than the page's.  Either the symbol
 `theme' to track the current Emacs faces, or a cons cell of
-\(FOREGROUND . BACKGROUND) naming colours ImageMagick understands."
+\(FOREGROUND . BACKGROUND) as hex colours (#rrggbb or #rgb) or black or white."
   :type '(choice (const :tag "Follow the Emacs theme" theme)
                  (cons :tag "Explicit" string string)))
 
@@ -90,8 +90,8 @@ follow the editor's theme rather than the page's.  Either the symbol
       clerkenwell-ink-colors
     (let ((fg (face-attribute 'default :foreground nil t))
           (bg (face-attribute 'default :background nil t)))
-      ;; A terminal frame can report `unspecified-*', which ImageMagick would
-      ;; reject; fall back to the ink-on-paper default in that case.
+      ;; A terminal frame can report `unspecified-*', which the renderer
+      ;; would reject; fall back to the ink-on-paper default in that case.
       (cons (if (and (stringp fg) (string-prefix-p "#" fg)) fg "black")
             (if (and (stringp bg) (string-prefix-p "#" bg)) bg "white")))))
 

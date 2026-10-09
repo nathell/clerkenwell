@@ -29,11 +29,11 @@ than in your CIDER session.
   port, so the next `ssh -R` cannot bind it; and a multiplexed session cannot
   add a remote forward at all. Step 2 opts out explicitly.
 
-- ImageMagick and a JVM on the host, and the Inconsolata font. Output is drawn
-  in a monospace face so that on the page it is immediately distinguishable from
-  your own writing. A family name is resolved to a file with `fc-match`, since
-  ImageMagick builds without fontconfig cannot look one up by name; set
-  `clerkenwell.render/default-font` to a path to skip that.
+- A JVM on the host, and the Inconsolata font installed. Output is drawn in a
+  monospace face so that on the page it is immediately distinguishable from your
+  own writing. Images are drawn with Java2D, so no external image tool is
+  needed. To use a font that is not installed, set
+  `clerkenwell.render/default-font` to the path of a `.ttf` file.
 
 ## 1. Install the adapter on the device
 

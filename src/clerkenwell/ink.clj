@@ -18,10 +18,12 @@
    - Snapshots and observations are deduplicated by identity -- the stroke ids
      themselves and a content hash of the page file -- never by timestamp."
   (:require [clojure.java.io :as io]
-            [clojure.java.shell :as sh]
-            [clojure.string :as str]
+            [clerkenwell.image :as image]
             [clerkenwell.lines :as lines]
-            [clerkenwell.store :as store]))
+            [clerkenwell.store :as store])
+  (:import (java.awt BasicStroke Graphics2D)
+           (java.awt.geom Path2D Path2D$Double)
+           (java.awt.image BufferedImage)))
 
 (def default-opts
   "Rendering options. :stroke-width and :margin are in page units;
@@ -44,16 +46,19 @@
 
 ;; -------- rendering --------
 
-(defn- polyline-arg
-  "One stroke as a magick `polyline` primitive, translated from scene
-   coordinates (origin top-centre, x may be negative) into image coordinates
-   (origin top-left)."
-  [stroke tx ty k]
-  (when-let [pts (seq (:points stroke))]
-    (str "polyline "
-         (str/join " " (map (fn [{:keys [x y]}]
-                              (str (int (* k (- x tx))) "," (int (* k (- y ty)))))
-                            pts)))))
+(defn- stroke-path
+  "One stroke as a path, translated from scene coordinates (origin top-centre,
+   x may be negative) into image coordinates (origin top-left). A single point
+   becomes a zero-length segment, which the round cap draws as a dot."
+  ^Path2D [stroke tx ty k]
+  (when-let [[p & more] (seq (:points stroke))]
+    (let [xy (fn [{:keys [x y]}] [(* k (- x tx)) (* k (- y ty))])
+          path (Path2D$Double.)
+          [x0 y0] (xy p)]
+      (.moveTo path (double x0) (double y0))
+      (doseq [[x y] (map xy (or more [p]))]
+        (.lineTo path (double x) (double y)))
+      path)))
 
 (defn render-strokes!
   "Render `strokes` to a PNG at `out-path`, cropped to their bounding box plus a
@@ -70,23 +75,17 @@
              h (int (* k (+ (- (:max-y bb) (:min-y bb)) (* 2 margin))))
              tx (- (:min-x bb) margin)
              ty (- (:min-y bb) margin)
-             draws (mapcat (fn [pl] ["-draw" pl])
-                           (keep #(polyline-arg % tx ty k) strokes))
-             out (io/file out-path)]
-         (io/make-parents out)
-         (let [{:keys [exit err]}
-               (apply sh/sh (concat ["magick" "-size" (str w "x" h)
-                                     (str "xc:" background)
-                                     "-fill" "none"
-                                     "-stroke" stroke-color
-                                     "-strokewidth" (str (* k stroke-width))
-                                     "-antialias"]
-                                    draws
-                                    [(str out)]))]
-           (when-not (zero? exit)
-             (throw (ex-info "ImageMagick failed rendering strokes"
-                             {:exit exit :err err})))
-           {:path (str out) :width w :height h :bbox bb}))))))
+             [img ^Graphics2D g] (image/canvas w h BufferedImage/TYPE_INT_RGB
+                                               (image/parse-color background))]
+         (try
+           (.setColor g (image/parse-color stroke-color))
+           (.setStroke g (BasicStroke. (float (* k stroke-width))
+                                       BasicStroke/CAP_ROUND
+                                       BasicStroke/JOIN_ROUND))
+           (doseq [path (keep #(stroke-path % tx ty k) strokes)]
+             (.draw g path))
+           (finally (.dispose g)))
+         {:path (image/write-png! img out-path) :width w :height h :bbox bb})))))
 
 ;; -------- observed state --------
 

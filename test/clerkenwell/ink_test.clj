@@ -43,6 +43,24 @@
         (is (= (:width r) (.getWidth img)))))
     (.delete (io/file out))))
 
+(deftest strokes-are-drawn-in-the-requested-colours
+  (let [out (io/file (System/getProperty "java.io.tmpdir") (str "ink-" (random-uuid) ".png"))
+        _ (ink/render-strokes! (strokes) out {:stroke-color "#ffffff" :background "#002451"})
+        img (javax.imageio.ImageIO/read (io/file out))
+        rgbs (frequencies (for [x (range (.getWidth img)) y (range (.getHeight img))]
+                            (bit-and 0xffffff (.getRGB img x y))))]
+    (is (= 0x002451 (key (apply max-key val rgbs))) "the background dominates")
+    (is (contains? rgbs 0xffffff) "and the ink is there")
+    (.delete (io/file out))))
+
+(deftest a-lone-point-is-a-dot
+  (let [out (io/file (System/getProperty "java.io.tmpdir") (str "ink-" (random-uuid) ".png"))
+        _ (ink/render-strokes! [{:points [{:x 0 :y 0}]}] out)
+        img (javax.imageio.ImageIO/read (io/file out))
+        c (:margin ink/default-opts)]
+    (is (= 0 (bit-and 0xffffff (.getRGB img c c))))
+    (.delete (io/file out))))
+
 (deftest nothing-to-draw-is-not-an-error
   (is (nil? (ink/render-strokes! [] "/tmp/never-written.png")))
   (is (nil? (ink/render-strokes! [{:points []}] "/tmp/never-written.png"))))

@@ -50,16 +50,14 @@
                (assoc render/default-limits :timeout-ms 300)))]
       (is (string? (:text p))))))
 
-(deftest font-resolution
-  (testing "an existing path is used as given"
-    (is (= "test/resources/sample-page.rm"
-           (render/resolve-font "test/resources/sample-page.rm"))))
-  (testing "a family name resolves to a file where fontconfig is available"
-    (let [r (render/resolve-font render/default-font)]
-      ;; Either a resolved path, or the name passed through on a system
-      ;; without fc-match. Both are acceptable; a crash is not.
-      (is (string? r))
-      (is (seq r)))))
+(deftest font-loading
+  (testing "an installed family loads at the requested size"
+    (let [f (render/load-font render/default-font 40)]
+      (is (= render/default-font (.getFamily f)))
+      (is (= 40 (.getSize f)))))
+  (testing "a missing family is an error, not a silent fallback face"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not installed"
+                          (render/load-font "No Such Font Anywhere" 40)))))
 
 (deftest source-on-the-tablet
   (testing "by default only the result is written to the page"
@@ -109,6 +107,21 @@
                                 {:max-width 1284 :max-height 1800})]
         (is (:ok? r))
         (is (<= (:width r) 1284))))
+    (testing "a word wider than the page is broken rather than overflowing"
+      (let [r (render/rasterize {:kind :text :text (str "=> " (apply str (repeat 300 "x")))}
+                                tmp {:max-width 600 :max-height 1800})]
+        (is (:ok? r))
+        (is (<= (:width r) 600))
+        (is (> (:height r) 100) "it took several lines")))
+    (testing "indentation survives, so pretty-printed code stays aligned"
+      (let [flush (render/rasterize {:kind :text :text "a\nb"} tmp {:max-width 1284})
+            indented (render/rasterize {:kind :text :text "a\n    b"} tmp {:max-width 1284})]
+        (is (> (:width indented) (:width flush)))))
+    (testing "a flood of newlines is refused without drawing it"
+      (let [r (render/rasterize {:kind :text :text (str "=> " (apply str (repeat 100000 "\n")) "x")}
+                                tmp {:max-width 1284 :max-height 1800})]
+        (is (false? (:ok? r)))
+        (is (= :insufficient-space (:reason r)))))
     (testing "a result too tall for the page is refused, not cropped"
       (let [long-text (str "=> " (str/join " " (repeat 400 "toomuch")))
             r (render/rasterize {:kind :text :text long-text} tmp

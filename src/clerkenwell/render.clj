@@ -8,8 +8,10 @@
    exist. Arbitrary print methods can block or throw, so presentation is bounded
    in work and time independently of evaluation."
   (:require [clojure.java.io :as io]
-            [clojure.java.shell :as sh]
-            [clojure.string :as str]))
+            [clojure.string :as str]
+            [clerkenwell.image :as image])
+  (:import (java.awt Color Font FontMetrics Graphics2D)
+           (java.awt.image BufferedImage DataBufferByte)))
 
 ;; -------- limits --------
 
@@ -28,22 +30,19 @@
 (def default-font "Inconsolata")
 (def default-font-size 40)
 
-(defn resolve-font
-  "Turn a font family name into something ImageMagick will accept.
-
-   Builds without fontconfig support cannot look a family up by name, so a
-   family is resolved to a file with fc-match when that is available. An
-   existing path is passed through untouched."
-  [font]
-  (if (.exists (io/file font))
-    font
-    (or (try
-          (let [{:keys [exit out]} (sh/sh "fc-match" "-f" "%{file}" font)]
-            (when (and (zero? exit) (seq out) (.exists (io/file out)))
-              out))
-          (catch Exception _ nil))
-        ;; Let ImageMagick try, and fail with its own message if it cannot.
-        font)))
+(defn load-font
+  "The font to draw output in: a font file when `font` names one that exists,
+   otherwise an installed family. A missing family is an error rather than a
+   silent fallback, which would draw in a proportional face."
+  ^Font [font size]
+  (let [f (io/file font)]
+    (if (.isFile f)
+      (.deriveFont (Font/createFont Font/TRUETYPE_FONT f) (float size))
+      (let [ft (Font. ^String font Font/PLAIN (int size))]
+        (when-not (or (.equalsIgnoreCase (.getFamily ft) font)
+                      (.equalsIgnoreCase (.getFontName ft) font))
+          (throw (ex-info (str "Font not installed: " font) {:font font})))
+        ft))))
 
 ;; The verified page geometry (docs/investigation-results.md): 1404 x 1872,
 ;; scene origin top-centre. Callers pass the usable box; these are the outer
@@ -130,23 +129,55 @@
 
 ;; -------- rasterization --------
 
-(defn- magick [args]
-  (let [{:keys [exit out err]} (apply sh/sh args)]
-    (when-not (zero? exit)
-      (throw (ex-info "ImageMagick failed" {:exit exit :err err :args args})))
-    out))
+;; Wrapping and trimming follow what ImageMagick's `caption:` + `-trim` did
+;; before: word-wrap within the width, break a word only when it alone is too
+;; wide, and keep the image tight around the glyphs.
 
-(defn- identify-dims [path]
-  (let [out (magick ["magick" "identify" "-format" "%w %h" (str path)])
-        [w h] (map parse-long (str/split (str/trim out) #"\s+"))]
-    [w h]))
+(defn- break-word
+  "Split `s` into pieces that each fit `max-width`, at least one char apiece."
+  [^FontMetrics fm max-width s]
+  (loop [s s acc []]
+    (if (<= (.stringWidth fm s) max-width)
+      (conj acc s)
+      (let [n (max 1 (count (take-while #(<= (.stringWidth fm (subs s 0 %)) max-width)
+                                        (range 1 (count s)))))]
+        (recur (subs s n) (conj acc (subs s 0 n)))))))
+
+(defn- wrap-line
+  "Word-wrap one line of text to `max-width` pixels. Leading indentation is
+   kept; the whitespace at a break is dropped."
+  [^FontMetrics fm max-width line]
+  (let [fits? #(<= (.stringWidth fm %) max-width)]
+    (loop [[tok & more :as toks] (re-seq #"\s*\S+|\s+" line)
+           cur "" acc []]
+      (cond
+        (empty? toks) (conj acc cur)
+        (fits? (str cur tok)) (recur more (str cur tok) acc)
+        (str/blank? cur)
+        ;; Nothing on this line yet, so the word itself is too wide.
+        (let [pieces (break-word fm max-width (str cur tok))]
+          (recur more (peek pieces) (into acc (pop pieces))))
+        :else (recur (cons (str/triml tok) more) "" (conj acc cur))))))
+
+(defn- ink-bounds
+  "[x y w h] of the non-white pixels in a gray image, or nil if it is blank."
+  [^BufferedImage img]
+  (let [w (.getWidth img) h (.getHeight img)
+        ^bytes px (.getData ^DataBufferByte (.getDataBuffer (.getRaster img)))]
+    (loop [i 0 x0 w y0 h x1 -1 y1 -1]
+      (if (< i (alength px))
+        (if (= -1 (aget px i))              ; 0xff, white
+          (recur (inc i) x0 y0 x1 y1)
+          (let [x (rem i w) y (quot i w)]
+            (recur (inc i) (min x0 x) (min y0 y) (max x1 x) (max y1 y))))
+        (when (>= x1 0)
+          [x0 y0 (inc (- x1 x0)) (inc (- y1 y0))])))))
 
 (defn rasterize
   "Render `presentation`'s text to a PNG at `out-path`.
 
-   Wrapping is done by ImageMagick's `caption:`, bounded to :max-width, so long
-   results wrap rather than run off the page. The text is passed as a process
-   argument, never interpolated into a shell command.
+   Long lines word-wrap within :max-width, so results wrap rather than run off
+   the page, and the image is trimmed tight around the glyphs.
 
    Returns {:ok? true :path :width :height} or, when the result does not fit the
    supported page area, {:ok? false :reason :insufficient-space ...}. It never
@@ -155,26 +186,44 @@
                           :or {font default-font font-size default-font-size}}]
   (let [max-width (min (or max-width page-width) page-width)
         max-height (min (or max-height page-height) page-height)
-        out (io/file out-path)]
-    (io/make-parents out)
-    ;; `caption:` pads to the full -size width, which would insert a full-width
-    ;; white block over whatever sits to the right of the text. `-trim` removes
-    ;; only the uniform border, so the asset is tight around the glyphs. That is
-    ;; not cropping content: the wrap width above is what bounds the text, and
-    ;; an over-large result is refused below rather than shrunk.
-    (magick ["magick"
-             "-background" "white"
-             "-fill" "black"
-             "-font" (resolve-font font)
-             "-pointsize" (str font-size)
-             "-size" (str max-width "x")
-             (str "caption:" (or (:tablet-text presentation) (:text presentation)))
-             "-trim" "+repage"
-             (str out)])
-    (let [[w h] (identify-dims out)]
-      (if (or (> w max-width) (> h max-height))
-        (do (.delete out)
-            {:ok? false :reason :insufficient-space
-             :width w :height h
-             :max-width max-width :max-height max-height})
-        {:ok? true :path (str out) :width w :height h}))))
+        out (io/file out-path)
+        fnt (load-font font font-size)
+        [_ ^Graphics2D pg] (image/canvas 1 1 BufferedImage/TYPE_BYTE_GRAY Color/white)
+        fm (.getFontMetrics pg fnt)
+        _ (.dispose pg)
+        text (or (:tablet-text presentation) (:text presentation))
+        lines (->> (str/split-lines text)
+                   (mapcat #(wrap-line fm max-width %))
+                   ;; Blank edge lines would be trimmed away anyway.
+                   (drop-while str/blank?) reverse (drop-while str/blank?) reverse
+                   vec)
+        lh (.getHeight fm)
+        refuse (fn [w h]
+                 (.delete out)
+                 {:ok? false :reason :insufficient-space
+                  :width w :height h
+                  :max-width max-width :max-height max-height})]
+    (cond
+      (empty? lines) (refuse 0 0)
+      ;; The first and last lines carry ink, so the trimmed image is at least
+      ;; this tall. Refusing here means never allocating a canvas for, say,
+      ;; ten thousand newlines.
+      (> (* (dec (count lines)) lh) max-height)
+      (refuse max-width (* (dec (count lines)) lh))
+      :else
+      (let [[img ^Graphics2D g] (image/canvas max-width (* (count lines) lh)
+                                              BufferedImage/TYPE_BYTE_GRAY Color/white)]
+        (try
+          (.setFont g fnt)
+          (.setColor g Color/black)
+          (doseq [[i line] (map-indexed vector lines)]
+            (.drawString g ^String line (int 0) (int (+ (.getAscent fm) (* i lh)))))
+          (finally (.dispose g)))
+        (let [[x y w h] (ink-bounds img)]
+          (cond
+            (nil? x) (refuse 0 0)               ; only invisible characters
+            (> h max-height) (refuse w h)
+            :else
+            {:ok? true
+             :path (image/write-png! (.getSubimage ^BufferedImage img x y w h) out)
+             :width w :height h}))))))
