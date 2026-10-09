@@ -13,3 +13,16 @@
   (testing "anything else is refused rather than guessed at"
     (is (thrown? clojure.lang.ExceptionInfo (image/parse-color "unspecified-fg")))
     (is (thrown? clojure.lang.ExceptionInfo (image/parse-color "#12345")))))
+
+(deftest grayscale-keeps-midtones
+  (let [img (java.awt.image.BufferedImage. 4 4 java.awt.image.BufferedImage/TYPE_INT_RGB)
+        g (.createGraphics img)]
+    (.setColor g (Color. 0x80 0x80 0x80))
+    (.fillRect g 0 0 4 4)
+    (.dispose g)
+    (let [out (image/scale img 4 4)]
+      (is (= java.awt.image.BufferedImage/TYPE_BYTE_GRAY (.getType out)))
+      ;; The raw sample, which is what the PNG stores. getRGB would report
+      ;; it lightened, through Java's linear gray colour space.
+      (is (= 0x80 (.getSample (.getRaster out) 1 1 0))
+          "mid-gray stays mid-gray"))))

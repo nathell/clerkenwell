@@ -116,6 +116,7 @@
                               (:value ev)
                               (cond-> (merge render/default-limits
                                              {:form (:ok parsed)
+                                              :chart-width usable-w
                                               :right-margin (render/columns
                                                              usable-w
                                                              render/default-font

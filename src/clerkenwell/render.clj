@@ -30,7 +30,14 @@
    :timeout-ms 2000
    ;; Columns a long value is pretty-printed to. Callers that know the page
    ;; width pass what fits it (see `columns`).
-   :right-margin 64})
+   :right-margin 64
+   ;; Pixels a chart is drawn across: the page between its margins, unless
+   ;; the caller says otherwise. Charts are scaled up as well as down, so a
+   ;; small one is still legible on paper.
+   :chart-width 1284
+   ;; Drawing a chart can take far longer than printing a value, and the
+   ;; first one also waits for the JIT.
+   :chart-timeout-ms 20000})
 
 ;; Inconsolata rather than the handwriting face Edsger used: on the page,
 ;; output in a monospace font is immediately distinguishable from your own
@@ -252,6 +259,25 @@
              :width tw :height th
              :original [w h]}))))))
 
+(defn- chart?
+  "Whether `value` is a Plotje pose. Plotje is optional: nothing of it is
+   loaded here unless the notebook has loaded it already."
+  [value]
+  (boolean (and (map? value)
+                (find-ns 'scicloj.plotje.api)
+                ((requiring-resolve 'clerkenwell.chart/pose?) value))))
+
+(defn- capture-chart
+  "A Plotje pose drawn `width` pixels wide and captured as an image. A pose
+   Plotje cannot draw is a result in its own right, which says why."
+  [pose width]
+  (try
+    (assoc (capture-image ((requiring-resolve 'clerkenwell.chart/draw)
+                           pose width page-height))
+           :text "=> #<chart>")
+    (catch Exception e
+      {:image-problem (str "=> #<chart, could not be drawn: " (.getMessage e) ">")})))
+
 (defn present
   "Bound `value` into a presentation map, the thing persisted before anything is
    drawn:
@@ -262,8 +288,10 @@
    The value is classified with Kindly first (`form`, under :form in the
    limits, is what produced it). A hidden value becomes {:kind :hidden}, whose
    :tablet-text is only the source, or nil when there is nothing at all to put
-   on the page. Every other kind is printed as text for now; :kindly-kind
-   records what it was, so it can be drawn better once that kind is supported.
+   on the page. An image, or a Plotje chart, becomes {:kind :image}, carrying
+   its PNG bytes for the caller to persist. Every other kind is printed as
+   text for now; :kindly-kind records what it was, so it can be drawn better
+   once that kind is supported.
 
    Retains Edsger's `=>` convention. `nil` and `false` are ordinary results and
    print as themselves. On a print method that throws or outstays its welcome,
@@ -272,26 +300,36 @@
   ([value] (present value default-limits))
   ([value limits]
    (let [{:keys [max-chars source form print-level print-length timeout-ms
-                 right-margin]
+                 right-margin chart-width chart-timeout-ms]
           :as limits} (merge default-limits limits)
-         r (run-bounded
+         ;; Classified first and on its own, because what the value is decides
+         ;; how long drawing it may take.
+         c (run-bounded
             (fn []
               ;; A broken advisor must not cost the result: without a kind it
               ;; is simply printed.
-              (let [{:keys [kind value]} (try (classify form value)
-                                              (catch Exception _ {:value value}))]
-                (merge
-                 {:kindly-kind kind}
-                 ;; Encoded here, on the bounded thread: decoding a file and
-                 ;; scaling a large image take real time.
-                 (when (= kind :kind/image) (capture-image value))
-                 (when-not (= kind :kind/hidden)
-                   {:printed (binding [*print-level* print-level
-                                       *print-length* print-length]
-                               (cond
-                                 (and (= kind :kind/code) (string? value)) value
-                                 :else (print-value value right-margin)))}))))
+              (let [{:keys [kind value] :as c} (try (classify form value)
+                                                    (catch Exception _ {:value value}))]
+                (assoc c :chart? (and (not= kind :kind/hidden) (chart? value)))))
             timeout-ms)
+         r (if-not (:ok c)
+             c
+             (let [{:keys [kind value chart?]} (:ok c)]
+               (run-bounded
+                (fn []
+                  (merge
+                   {:kindly-kind kind}
+                   ;; Drawn and encoded here, on the bounded thread: a chart,
+                   ;; or decoding and scaling a large image, takes real time.
+                   (cond chart? (capture-chart value chart-width)
+                         (= kind :kind/image) (capture-image value))
+                   (when-not (or chart? (= kind :kind/hidden))
+                     {:printed (binding [*print-level* print-level
+                                         *print-length* print-length]
+                                 (cond
+                                   (and (= kind :kind/code) (string? value)) value
+                                   :else (print-value value right-margin)))})))
+                (if chart? chart-timeout-ms timeout-ms))))
          ;; The source is bounded too: a long draft must not produce an image
          ;; that cannot fit the page.
          src (when source (cap source max-chars))]
@@ -314,17 +352,17 @@
         :kindly-kind :kind/hidden}
 
        (get-in r [:ok :png-bytes])
-       (let [{:keys [png-bytes width height original]} (:ok r)]
+       (let [{:keys [png-bytes width height original text]} (:ok r)]
          {:kind :image
           ;; The image bytes ride along only until the caller persists them as
           ;; a file and replaces them with its path, before the record is made.
           :png-bytes png-bytes
           :width width :height height
-          :text (str "=> #<image " (first original) "×" (second original) ">")
+          :text (or text (str "=> #<image " (first original) "×" (second original) ">"))
           ;; Only the source: the image itself is drawn beneath it.
           :tablet-text src
           :truncated? false
-          :kindly-kind :kind/image})
+          :kindly-kind (get-in r [:ok :kindly-kind])})
 
        :else
        (let [{:keys [printed kindly-kind]} (:ok r)

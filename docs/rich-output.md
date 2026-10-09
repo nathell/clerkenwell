@@ -147,9 +147,12 @@ a `BufferedImage` directly:
 No browser is involved, so charts fit the rest of the pipeline. Any other
 library that can produce a `BufferedImage` is covered by `:kind/image` for free.
 
-A pose is recognised as such during `present`, and drawn at its own width if it
-sets one, or at the usable page width otherwise; it is then scaled down if it
-is still too wide.
+A pose is recognised as such during `present` and draws itself through
+Plotje's own `plot`, in a format Clerkenwell registers that returns Plotje's
+membrane drawing instead of SVG or pixels. That drawing is scaled as vectors
+to the usable page width -- up as well as down, so a default 600-pixel chart
+is legible on paper -- and only then rasterised. A chart Plotje cannot draw
+becomes a text result saying why.
 
 **Grayscale defaults.** Plotje's default theme and palette are designed for
 colour screens: a gray background, and a categorical palette whose hues become
@@ -175,7 +178,14 @@ e-ink defaults, deep-merged under the contents of `plotje.edn` and under the
 value lives in a private atom, so reading it means either reaching into
 Plotje's internals or asking upstream for a public accessor (or, better, a
 "tool defaults" layer). Options on the plot itself win regardless, so an author
-can always override per chart.
+can always override per chart. A pose made inside `pj/with-config` restores
+that config when it is drawn, which replaces Clerkenwell's binding entirely:
+the author's explicit choice wins, though it also means no e-ink defaults for
+anything that config leaves unset.
+
+As built, the e-ink defaults are a white panel with a light grid, black for
+anything uncoloured, opaque points, and three grays (black, `#8C8C8C`,
+`#C8C8C8`) for categories; a fourth category repeats the first.
 
 If that turns out to be impractical, the fallback is to apply no defaults and
 leave grayscale styling to the notebook author.

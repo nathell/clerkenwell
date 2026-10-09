@@ -234,7 +234,7 @@
 (defn- decode [^bytes bs]
   (javax.imageio.ImageIO/read (java.io.ByteArrayInputStream. bs)))
 
-(defn- gray-at [img x y] (bit-and 0xff (.getRGB img x y)))
+(defn- gray-at [img x y] (.getSample (.getRaster img) x y 0))
 
 (deftest image-presentation
   (testing "a BufferedImage is an image, as the page will show it"
