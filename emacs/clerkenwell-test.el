@@ -389,3 +389,23 @@ face from clojure-mode; this checks text that is not."
       (should (eq 'font-lock-warning-face
                   (get-text-property (1- (point)) 'font-lock-face)))
       (should-not (get-text-property (1- (point)) 'face))))))
+
+(ert-deftest clerkenwell-test-markdown-result ()
+  "Markdown is shown as written, coloured by markdown-mode, and keeps its
+colours through the buffer's own font-lock."
+  (clerkenwell-test--with-buffer
+   (font-lock-mode 1)
+   (let ((clerkenwell-quiet t))
+     (clerkenwell--rebuild-history
+      (clerkenwell-test--entries
+       "{:entries [{:kind :computation :source \"(m)\" :text \"# Hello\" :presentation {:kind :md :text \"# Hello\"} :delivery :inserted}]}"))
+     (font-lock-ensure)
+     (should (string-match-p "^(m)\n# Hello$" (clerkenwell-test--buffer-text)))
+     (goto-char (point-min))
+     (search-forward "Hello")
+     (when (fboundp 'markdown-mode)
+       (should (get-char-property (1- (point)) 'font-lock-face))))))
+
+(ert-deftest clerkenwell-test-fontify-without-the-mode ()
+  "Without the mode, the text is just the text."
+  (should (equal "# Hi" (clerkenwell--fontify "# Hi" 'clerkenwell-no-such-mode))))

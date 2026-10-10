@@ -128,7 +128,7 @@ presentation's `:kind`.
 | `:image` | `ImageIO`; scale to fit. | Trivial |
 | Charts | Plotje, straight to a `BufferedImage` (below). | Small |
 | `:table` | HTML typeset by openhtmltopdf (below). | Small |
-| `:md` | HTML typeset by openhtmltopdf, from commonmark-java. | Medium |
+| `:md` | HTML typeset by openhtmltopdf, from nextjournal/markdown (below). | Small |
 
 Tables and Markdown go through one HTML pipeline (`clerkenwell.html`):
 well-formed XHTML with a stylesheet, laid out and drawn by openhtmltopdf's
@@ -156,6 +156,21 @@ page is set smaller, down to 28px from 40px; one still too wide wraps its
 cells between words; only if even that cannot fit is the drawing scaled down.
 Like text, a table too tall for the room left is refused, not squeezed. Emacs
 shows the same rows and columns as an Org-style text table.
+
+### Markdown
+
+`kind/md` takes a string, or a sequence of strings as lines, bounded like
+text. nextjournal/markdown (commonmark-java underneath, with GFM tables,
+strikethrough, task lists, footnotes and autolinks) parses it into hiccup,
+which Clerkenwell serialises as XHTML. Body text is set in Times New Roman,
+code in Inconsolata; code blocks wrap rather than being cut off at the edge.
+
+Nothing is fetched while drawing: an image is shown as its alt text in
+brackets. Raw HTML is shown as the text it was written as, formulas as their
+`$` source, tags as plain text, and a task's box as `[x]` or `[ ]`. Markdown
+is typeset to the page width and, like text, refused if too tall for the room
+left. Emacs shows the Markdown as written, coloured by `markdown-mode` when it
+is installed.
 
 ### Charts
 
@@ -221,7 +236,8 @@ leave grayscale styling to the notebook author.
   is a pose, and a notebook that produced a pose has Plotje loaded already.
 - openhtmltopdf (`io.github.openhtmltopdf/openhtmltopdf-java2d`): pure Java;
   a hard dependency, for tables and Markdown.
-- commonmark-java: added when `:md` is.
+- nextjournal/markdown (`io.github.nextjournal/markdown`, from Clojars), which
+  brings commonmark-java and its extensions.
 
 `kindly-render` was considered and is not used. It produces HTML, hiccup and
 JavaScript for a browser, so it helps as a reference for which kinds exist, but

@@ -14,6 +14,7 @@
             [clojure.pprint :as pp]
             [clojure.string :as str]
             [clerkenwell.image :as image]
+            [clerkenwell.markdown :as markdown]
             [clerkenwell.table :as table]
             [scicloj.kindly-advice.v1.api :as advice])
   (:import (java.awt Color Font FontMetrics Graphics2D)
@@ -290,7 +291,8 @@
    limits, is what produced it). A hidden value becomes {:kind :hidden}, whose
    :tablet-text is only the source, or nil when there is nothing at all to put
    on the page. An image, or a Plotje chart, becomes {:kind :image}, carrying
-   its PNG bytes for the caller to persist. Every other kind is printed as
+   its PNG bytes for the caller to persist. A table becomes {:kind :table}
+   and Markdown {:kind :md}, both typeset only when rasterised. Every other kind is printed as
    text for now; :kindly-kind records what it was, so it can be drawn better
    once that kind is supported.
 
@@ -327,13 +329,20 @@
                           (cond chart? (capture-chart value chart-width)
                                 (= kind :kind/image) (capture-image value)
                                 (#{:kind/table :kind/dataset} kind)
-                                (some->> (table/table-data value) (hash-map :table)))]
+                                (some->> (table/table-data value) (hash-map :table))
+                                ;; Clay takes a string, or a sequence of them
+                                ;; as lines.
+                                (= kind :kind/md)
+                                (cond (string? value) {:markdown value}
+                                      (and (sequential? value) (every? string? (take 1000 value)))
+                                      {:markdown (str/join "\n" (take 1000 value))}))]
                       (merge
                        {:kindly-kind kind}
                        special
                        ;; A value that is not the shape its kind says, such as
                        ;; kind/table on a number, is printed instead.
-                       (when-not (or chart? (= kind :kind/hidden) (:table special))
+                       (when-not (or chart? (= kind :kind/hidden) (:table special)
+                                     (:markdown special))
                          {:printed (if (and (= kind :kind/code) (string? value))
                                      value
                                      (print-value value right-margin))})))))
@@ -369,6 +378,17 @@
                  :tablet-text src
                  :truncated? false
                  :kindly-kind (get-in r [:ok :kindly-kind])}))
+
+       (get-in r [:ok :markdown])
+       (let [m (cap (get-in r [:ok :markdown]) max-chars)]
+         {:kind :md
+          :markdown m
+          ;; What Emacs shows: the Markdown as written.
+          :text m
+          ;; Only the source: the Markdown itself is typeset beneath it.
+          :tablet-text src
+          :truncated? (> (count (get-in r [:ok :markdown])) max-chars)
+          :kindly-kind :kind/md})
 
        (get-in r [:ok :png-bytes])
        (let [{:keys [png-bytes width height original text]} (:ok r)]
@@ -512,7 +532,8 @@
    page, and is trimmed tight around the glyphs; it is never shrunk. An image
    (read from :image, relative to :base-dir) is scaled down to the room left,
    beneath its source if that is to go on the page too. A table is typeset to
-   the width, beneath its source likewise, and refused like text if too tall.
+   the width, beneath its source likewise, and refused like text if too tall;
+   so is Markdown.
 
    Returns {:ok? true :path :width :height} or, when the result does not fit the
    supported page area, {:ok? false :reason :insufficient-space ...}. Rather than
@@ -551,16 +572,18 @@
           (refuse {:width w :height (+ above wide-h)})
           :else (done (stack (:image src) (image/scale img tw th)))))
 
-      :table
+      (:table :md)
       ;; Typeset text: fitted to the width, but, like text, never squeezed
       ;; to the height.
       (let [src (when-let [t (:tablet-text presentation)] (text-image t opts))
-            ^BufferedImage tbl (table/image presentation max-width)
-            total (+ (above-height src) (.getHeight tbl))]
+            ^BufferedImage typeset (if (= :table (:kind presentation))
+                                     (table/image presentation max-width)
+                                     (markdown/image (:markdown presentation) max-width))
+            total (+ (above-height src) (.getHeight typeset))]
         (cond
           (:refused src) (refuse (:refused src))
-          (> total max-height) (refuse {:width (.getWidth tbl) :height total})
-          :else (done (stack (:image src) tbl))))
+          (> total max-height) (refuse {:width (.getWidth typeset) :height total})
+          :else (done (stack (:image src) typeset))))
 
       (let [{:keys [image refused]} (text-image text opts)]
         (if refused (refuse refused) (done image))))))

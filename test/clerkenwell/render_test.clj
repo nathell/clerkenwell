@@ -175,10 +175,10 @@
       (is (= "(load-data)" (:tablet-text p))))))
 
 (deftest unsupported-kinds-fall-back-to-text
-  (let [p (render/present (kind/md "# Hello"))]
+  (let [p (render/present (kind/vega-lite {:mark "bar"}))]
     (is (= :text (:kind p)))
-    (is (= :kind/md (:kindly-kind p)) "remembered, for when it is supported")
-    (is (= "=> \"# Hello\"" (:text p)))))
+    (is (= :kind/vega-lite (:kindly-kind p)) "remembered, for when it is supported")
+    (is (= "=> {:mark \"bar\"}" (:text p)))))
 
 (deftest code-is-shown-as-written
   (is (= "(defn f [x]\n  x)" (:text (render/present (kind/code "(defn f [x]\n  x)"))))))

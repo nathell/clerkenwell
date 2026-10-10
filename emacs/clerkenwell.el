@@ -367,6 +367,26 @@ the page."
                                    (if (string-empty-p other) "missing" other))
                            'font-lock-face 'font-lock-warning-face))))))
 
+(defun clerkenwell--fontify (text mode)
+  "TEXT as MODE would colour it, or plain TEXT if MODE is not available.
+The faces are carried as `font-lock-face', so the buffer's own font-lock
+keeps them; nothing else of MODE's (hidden markup, say) comes along."
+  (if (not (fboundp mode))
+      text
+    (with-temp-buffer
+      (insert text)
+      (delay-mode-hooks (funcall mode))
+      (font-lock-ensure)
+      (let ((out (buffer-substring-no-properties (point-min) (point-max)))
+            (pos (point-min)))
+        (while (< pos (point-max))
+          (let ((next (next-single-property-change pos 'face nil (point-max)))
+                (face (get-text-property pos 'face)))
+            (when face
+              (put-text-property (1- pos) (1- next) 'font-lock-face face out))
+            (setq pos next)))
+        out))))
+
 (defun clerkenwell--render-presentation (entry)
   "Insert the result of computation ENTRY, drawn according to its kind.
 No trailing newline; the delivery note follows on the same line.
@@ -378,6 +398,8 @@ presentation carries as a fallback."
     (pcase (clerkenwell--name (clerkenwell--get pres :kind))
       ("hidden"
        (insert (propertize ";; value hidden" 'font-lock-face 'font-lock-comment-face)))
+      ("md"
+       (insert (clerkenwell--fontify (format "%s" text) 'markdown-mode)))
       ("image"
        (let* ((file (clerkenwell--get entry :image))
               (problem (or (clerkenwell--file-image-problem file)
