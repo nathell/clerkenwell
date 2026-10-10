@@ -14,9 +14,10 @@
             [clojure.pprint :as pp]
             [clojure.string :as str]
             [clerkenwell.image :as image]
+            [clerkenwell.table :as table]
             [scicloj.kindly-advice.v1.api :as advice])
   (:import (java.awt Color Font FontMetrics Graphics2D)
-           (java.awt.image BufferedImage DataBufferByte)))
+           (java.awt.image BufferedImage)))
 
 ;; -------- limits --------
 
@@ -317,18 +318,25 @@
              (let [{:keys [kind value chart?]} (:ok c)]
                (run-bounded
                 (fn []
-                  (merge
-                   {:kindly-kind kind}
-                   ;; Drawn and encoded here, on the bounded thread: a chart,
-                   ;; or decoding and scaling a large image, takes real time.
-                   (cond chart? (capture-chart value chart-width)
-                         (= kind :kind/image) (capture-image value))
-                   (when-not (or chart? (= kind :kind/hidden))
-                     {:printed (binding [*print-level* print-level
-                                         *print-length* print-length]
-                                 (cond
-                                   (and (= kind :kind/code) (string? value)) value
-                                   :else (print-value value right-margin)))})))
+                  (binding [*print-level* print-level
+                            *print-length* print-length]
+                    (let [special
+                          ;; Drawn and encoded here, on the bounded thread: a
+                          ;; chart, or decoding and scaling a large image,
+                          ;; takes real time.
+                          (cond chart? (capture-chart value chart-width)
+                                (= kind :kind/image) (capture-image value)
+                                (#{:kind/table :kind/dataset} kind)
+                                (some->> (table/table-data value) (hash-map :table)))]
+                      (merge
+                       {:kindly-kind kind}
+                       special
+                       ;; A value that is not the shape its kind says, such as
+                       ;; kind/table on a number, is printed instead.
+                       (when-not (or chart? (= kind :kind/hidden) (:table special))
+                         {:printed (if (and (= kind :kind/code) (string? value))
+                                     value
+                                     (print-value value right-margin))})))))
                 (if chart? chart-timeout-ms timeout-ms))))
          ;; The source is bounded too: a long draft must not produce an image
          ;; that cannot fit the page.
@@ -350,6 +358,17 @@
         :tablet-text src
         :truncated? false
         :kindly-kind :kind/hidden}
+
+       (get-in r [:ok :table])
+       (let [t (get-in r [:ok :table])]
+         (merge {:kind :table}
+                t
+                {;; What Emacs shows: aligned text, as the buffer is monospace.
+                 :text (table/text t)
+                 ;; Only the source: the table itself is typeset beneath it.
+                 :tablet-text src
+                 :truncated? false
+                 :kindly-kind (get-in r [:ok :kindly-kind])}))
 
        (get-in r [:ok :png-bytes])
        (let [{:keys [png-bytes width height original text]} (:ok r)]
@@ -413,20 +432,6 @@
           (recur more (peek pieces) (into acc (pop pieces))))
         :else (recur (cons (str/triml tok) more) "" (conj acc cur))))))
 
-(defn- ink-bounds
-  "[x y w h] of the non-white pixels in a gray image, or nil if it is blank."
-  [^BufferedImage img]
-  (let [w (.getWidth img) h (.getHeight img)
-        ^bytes px (.getData ^DataBufferByte (.getDataBuffer (.getRaster img)))]
-    (loop [i 0 x0 w y0 h x1 -1 y1 -1]
-      (if (< i (alength px))
-        (if (= -1 (aget px i))              ; 0xff, white
-          (recur (inc i) x0 y0 x1 y1)
-          (let [x (rem i w) y (quot i w)]
-            (recur (inc i) (min x0 x) (min y0 y) (max x1 x) (max y1 y))))
-        (when (>= x1 0)
-          [x0 y0 (inc (- x1 x0)) (inc (- y1 y0))])))))
-
 (defn- text-image
   "`text` drawn in black on white, word-wrapped within `max-width` and trimmed
    tight around the glyphs. Returns {:image img} or, when it would be taller
@@ -459,7 +464,7 @@
           (doseq [[i line] (map-indexed vector lines)]
             (.drawString g ^String line (int 0) (int (+ (.getAscent fm) (* i lh)))))
           (finally (.dispose g)))
-        (let [[x y w h] (ink-bounds img)]
+        (let [[x y w h] (image/ink-bounds img)]
           (cond
             (nil? x) (refuse 0 0)               ; only invisible characters
             (> h max-height) (refuse w h)
@@ -476,13 +481,38 @@
    result is better refused, so it stays pending, than squeezed."
   100)
 
+(defn- above-height
+  "How far down the page a drawing starts beneath source text `src`
+   (a text-image result, or nil when there is no source)."
+  [src]
+  (if-let [^BufferedImage img (:image src)]
+    (+ (.getHeight img) source-gap)
+    0))
+
+(defn- stack
+  "Source image `src` (or nil) above `img`, on white."
+  ^BufferedImage [^BufferedImage src ^BufferedImage img]
+  (if-not src
+    img
+    (let [above (+ (.getHeight src) source-gap)
+          [canvas ^Graphics2D g] (image/canvas (max (.getWidth src) (.getWidth img))
+                                               (+ above (.getHeight img))
+                                               BufferedImage/TYPE_BYTE_GRAY
+                                               Color/white)]
+      (try
+        (.drawImage g src 0 0 nil)
+        (.drawImage g img 0 (int above) nil)
+        (finally (.dispose g)))
+      canvas)))
+
 (defn rasterize
   "Render `presentation` to a PNG at `out-path`.
 
    Text word-wraps within :max-width, so results wrap rather than run off the
    page, and is trimmed tight around the glyphs; it is never shrunk. An image
    (read from :image, relative to :base-dir) is scaled down to the room left,
-   beneath its source if that is to go on the page too.
+   beneath its source if that is to go on the page too. A table is typeset to
+   the width, beneath its source likewise, and refused like text if too tall.
 
    Returns {:ok? true :path :width :height} or, when the result does not fit the
    supported page area, {:ok? false :reason :insufficient-space ...}. Rather than
@@ -503,12 +533,10 @@
                {:ok? true :path (image/write-png! img out)
                 :width (.getWidth img) :height (.getHeight img)})
         text (or (:tablet-text presentation) (:text presentation))]
-    (if (not= :image (:kind presentation))
-      (let [{:keys [image refused]} (text-image text opts)]
-        (if refused (refuse refused) (done image)))
+    (case (:kind presentation)
+      :image
       (let [src (when-let [t (:tablet-text presentation)] (text-image t opts))
-            ^BufferedImage src-img (:image src)
-            above (if src-img (+ (.getHeight src-img) source-gap) 0)
+            above (above-height src)
             ^BufferedImage img (javax.imageio.ImageIO/read
                                 (io/file base-dir (:image presentation)))
             w (.getWidth img) h (.getHeight img)
@@ -521,13 +549,18 @@
           (:refused src) (refuse (:refused src))
           (and (< room wide-h) (< room (min wide-h min-image-height)))
           (refuse {:width w :height (+ above wide-h)})
-          :else
-          (let [cw (max tw (if src-img (.getWidth src-img) 0))
-                [canvas ^Graphics2D g] (image/canvas cw (+ above th)
-                                                     BufferedImage/TYPE_BYTE_GRAY
-                                                     Color/white)]
-            (try
-              (when src-img (.drawImage g src-img 0 0 nil))
-              (.drawImage g (image/scale img tw th) 0 (int above) nil)
-              (finally (.dispose g)))
-            (done canvas)))))))
+          :else (done (stack (:image src) (image/scale img tw th)))))
+
+      :table
+      ;; Typeset text: fitted to the width, but, like text, never squeezed
+      ;; to the height.
+      (let [src (when-let [t (:tablet-text presentation)] (text-image t opts))
+            ^BufferedImage tbl (table/image presentation max-width)
+            total (+ (above-height src) (.getHeight tbl))]
+        (cond
+          (:refused src) (refuse (:refused src))
+          (> total max-height) (refuse {:width (.getWidth tbl) :height total})
+          :else (done (stack (:image src) tbl))))
+
+      (let [{:keys [image refused]} (text-image text opts)]
+        (if refused (refuse refused) (done image))))))

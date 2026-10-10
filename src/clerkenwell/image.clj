@@ -5,7 +5,7 @@
   (:require [clojure.java.io :as io]
             [clojure.string :as str])
   (:import (java.awt Color Graphics2D RenderingHints)
-           (java.awt.image BufferedImage)
+           (java.awt.image BufferedImage DataBufferByte)
            (javax.imageio ImageIO)))
 
 ;; Rendering never needs a display. Without this, touching AWT on macOS puts a
@@ -95,6 +95,28 @@
               (.setInput r in)
               [(.getWidth r 0) (.getHeight r 0)]
               (finally (.dispose r)))))))))
+
+(defn ink-bounds
+  "[x y w h] of the non-white pixels in a gray image, or nil if it is blank."
+  [^BufferedImage img]
+  (let [w (.getWidth img) h (.getHeight img)
+        ^bytes px (.getData ^DataBufferByte (.getDataBuffer (.getRaster img)))]
+    (loop [i 0 x0 w y0 h x1 -1 y1 -1]
+      (if (< i (alength px))
+        (if (= -1 (aget px i))              ; 0xff, white
+          (recur (inc i) x0 y0 x1 y1)
+          (let [x (rem i w) y (quot i w)]
+            (recur (inc i) (min x0 x) (min y0 y) (max x1 x) (max y1 y))))
+        (when (>= x1 0)
+          [x0 y0 (inc (- x1 x0)) (inc (- y1 y0))])))))
+
+(defn trim
+  "A gray image cut to the bounding box of what is drawn on it; a blank one
+   is kept whole."
+  ^BufferedImage [^BufferedImage img]
+  (if-let [[x y w h] (ink-bounds img)]
+    (.getSubimage img x y w h)
+    img))
 
 (defn png-bytes
   "`img` encoded as PNG."

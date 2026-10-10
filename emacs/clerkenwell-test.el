@@ -360,3 +360,12 @@ separator, header and all."
         (let ((text (clerkenwell-test--buffer-text)))
           (should (string-match-p "=> #<image 2×2> \\[unreadable: /nonexistent.png\\]" text))))))
     (delete-file file)))
+
+(ert-deftest clerkenwell-test-table-result ()
+  "A table is shown as its aligned text."
+  (clerkenwell-test--with-buffer
+   (let ((clerkenwell-quiet t))
+     (clerkenwell--rebuild-history
+      (clerkenwell-test--entries
+       "{:entries [{:kind :computation :source \"(t)\" :text \"| a |\\n|---|\\n| 1 |\" :presentation {:kind :table :text \"| a |\\n|---|\\n| 1 |\"} :delivery :inserted}]}"))
+     (should (string-match-p "^(t)\n| a |\n|---|\n| 1 |$" (clerkenwell-test--buffer-text))))))

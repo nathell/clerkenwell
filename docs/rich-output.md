@@ -127,13 +127,35 @@ presentation's `:kind`.
 |---|---|---|
 | `:image` | `ImageIO`; scale to fit. | Trivial |
 | Charts | Plotje, straight to a `BufferedImage` (below). | Small |
-| `:table` | Our own Java2D grid: column widths from font metrics, truncated cells, rules between rows. | Small to medium |
-| `:md` | commonmark-java for the parse tree, then our own Java2D layout of styled runs: headings, paragraphs with emphasis and inline code, lists, code blocks, block quotes. Builds on the word wrap `render` already has. | Medium |
+| `:table` | HTML typeset by openhtmltopdf (below). | Small |
+| `:md` | HTML typeset by openhtmltopdf, from commonmark-java. | Medium |
 
-An alternative for Markdown, and the obvious route to `:kind/hiccup` and
-`:kind/html`, is to go through HTML and openhtmltopdf's Java2D backend, which
-handles CSS and tables. It is a heavier dependency with uncertain fit, and
-deserves a spike before anything depends on it.
+Tables and Markdown go through one HTML pipeline (`clerkenwell.html`):
+well-formed XHTML with a stylesheet, laid out and drawn by openhtmltopdf's
+Java2D backend (`io.github.openhtmltopdf`, the maintained fork). It is pure
+Java, about 10ms a render once warm, and handles CSS 2.1 and tables. It has no
+JavaScript, which rules out math; math is not wanted, since it is better
+written by hand on the page. The same pipeline is the route to `:kind/hiccup`
+and `:kind/html`.
+
+### Tables
+
+`kind/table` accepts what Clay accepts: a sequence of maps (which covers
+`print-table`'s format), a map of columns, `{:column-names :row-vectors}`,
+`{:row-maps}` with optional `:column-names`, and a sequence of sequences (no
+header). A tech.ml.dataset dataset is a table without asking; a sequence of
+maps without `kind/table` still prints as text.
+
+At most 30 rows and 12 columns are shown, each cell capped at 40 characters,
+with what was left out said beneath ("… 70 more rows"). A column of numbers
+aligns right. Headings drop a plain keyword's colon.
+
+On the page, tables are set in Times New Roman, a proportional face whose
+digits are all one width, so numbers still line up. A table too wide for the
+page is set smaller, down to 28px from 40px; one still too wide wraps its
+cells between words; only if even that cannot fit is the drawing scaled down.
+Like text, a table too tall for the room left is refused, not squeezed. Emacs
+shows the same rows and columns as an Org-style text table.
 
 ### Charts
 
@@ -197,6 +219,8 @@ leave grayscale styling to the notebook author.
 - Plotje: large (tablecloth, fastmath, clojure2d, membrane); **optional**.
   Clerkenwell loads its integration with `requiring-resolve` only when a value
   is a pose, and a notebook that produced a pose has Plotje loaded already.
+- openhtmltopdf (`io.github.openhtmltopdf/openhtmltopdf-java2d`): pure Java;
+  a hard dependency, for tables and Markdown.
 - commonmark-java: added when `:md` is.
 
 `kindly-render` was considered and is not used. It produces HTML, hiccup and
@@ -234,7 +258,7 @@ Each increment adds one kind end to end, on both targets, with tests:
   screenshot. Full fidelity for every kind at once, but it brings back an
   external dependency far heavier than the ImageMagick that has just been
   removed, so it should stay optional.
-- `:kind/hiccup` and `:kind/html`, if the openhtmltopdf spike succeeds.
+- `:kind/hiccup` and `:kind/html`, through the same HTML pipeline as tables.
 
 ## Decisions taken
 
