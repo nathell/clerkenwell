@@ -304,6 +304,10 @@ Also nil when images are turned off, which is a choice, not a problem."
        (equal "handwriting" (clerkenwell--name (clerkenwell--get entry :kind)))
        (not (clerkenwell--image-problem entry))))
 
+;; History text is styled with `font-lock-face', never `face': the buffer is
+;; in clojure-mode with font-lock on, and font-lock strips `face' from any
+;; text it refontifies, so a warning would quietly lose its colour.
+
 (defun clerkenwell--render-entry (entry &optional next)
   "Insert one history ENTRY at point.
 NEXT is the entry that follows it, if any: consecutive images are not
@@ -325,7 +329,7 @@ the page."
                     (format ";; handwriting — %s stroke%s%s\n"
                             n (if (equal n 1) "" "s")
                             (if problem (format " [%s]" problem) ""))
-                    'face (if problem 'font-lock-warning-face
+                    'font-lock-face (if problem 'font-lock-warning-face
                             'font-lock-comment-face))))
          (if (or problem (not clerkenwell-show-images))
              (insert "\n")
@@ -353,7 +357,7 @@ the page."
                (insert "\n\n")
              (insert (propertize
                       (format "   ; %s\n\n" state)
-                      'face (if (member state '("failed" "uncertain"))
+                      'font-lock-face (if (member state '("failed" "uncertain"))
                                 'font-lock-warning-face
                               'font-lock-comment-face)))))))
       (other
@@ -361,7 +365,7 @@ the page."
        ;; bug, and should look like one.
        (insert (propertize (format ";; unrecognised history entry (kind %s)\n"
                                    (if (string-empty-p other) "missing" other))
-                           'face 'font-lock-warning-face))))))
+                           'font-lock-face 'font-lock-warning-face))))))
 
 (defun clerkenwell--render-presentation (entry)
   "Insert the result of computation ENTRY, drawn according to its kind.
@@ -373,7 +377,7 @@ presentation carries as a fallback."
          (text (or (clerkenwell--get pres :text) (clerkenwell--get entry :text))))
     (pcase (clerkenwell--name (clerkenwell--get pres :kind))
       ("hidden"
-       (insert (propertize ";; value hidden" 'face 'font-lock-comment-face)))
+       (insert (propertize ";; value hidden" 'font-lock-face 'font-lock-comment-face)))
       ("image"
        (let* ((file (clerkenwell--get entry :image))
               (problem (or (clerkenwell--file-image-problem file)
@@ -383,12 +387,12 @@ presentation carries as a fallback."
              (clerkenwell--insert-sized-image
               file (clerkenwell--get entry :page-width))
            ;; As text, saying why when it is not by choice.
-           (insert (propertize (format "%s" text) 'face 'font-lock-string-face))
+           (insert (propertize (format "%s" text) 'font-lock-face 'font-lock-string-face))
            (when (and clerkenwell-show-images problem)
              (insert (propertize (format " [%s]" problem)
-                                 'face 'font-lock-warning-face))))))
+                                 'font-lock-face 'font-lock-warning-face))))))
       (_
-       (insert (propertize (format "%s" text) 'face 'font-lock-string-face))))))
+       (insert (propertize (format "%s" text) 'font-lock-face 'font-lock-string-face))))))
 
 (defun clerkenwell--render-entry-safely (entry next)
   "Render ENTRY, or a visible warning in its place if rendering fails.
@@ -399,7 +403,7 @@ One bad entry must not cost the rest of the history."
      (insert (propertize (format ";; could not render entry %s: %s\n\n"
                                  (clerkenwell--get entry :id)
                                  (error-message-string err))
-                         'face 'font-lock-warning-face)))))
+                         'font-lock-face 'font-lock-warning-face)))))
 
 (defun clerkenwell--rebuild-history (entries)
   "Replace the history region with ENTRIES, preserving the draft and point.
@@ -427,7 +431,7 @@ text, point and mark are restored around the rewrite."
       ;; restored however the rendering ends.
       (unwind-protect
           (progn
-            (insert (propertize ";; Clerkenwell\n\n" 'face 'font-lock-comment-face))
+            (insert (propertize ";; Clerkenwell\n\n" 'font-lock-face 'font-lock-comment-face))
             (let ((es entries))
               (while es
                 (clerkenwell--render-entry-safely (car es) (cadr es))

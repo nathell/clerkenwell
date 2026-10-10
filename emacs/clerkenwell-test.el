@@ -369,3 +369,23 @@ separator, header and all."
       (clerkenwell-test--entries
        "{:entries [{:kind :computation :source \"(t)\" :text \"| a |\\n|---|\\n| 1 |\" :presentation {:kind :table :text \"| a |\\n|---|\\n| 1 |\"} :delivery :inserted}]}"))
      (should (string-match-p "^(t)\n| a |\n|---|\n| 1 |$" (clerkenwell-test--buffer-text))))))
+
+(ert-deftest clerkenwell-test-faces-survive-font-lock ()
+  "A warning keeps its face when font-lock refontifies the history.
+Text in Clojure's comment syntax (a `;' note) still takes the comment
+face from clojure-mode; this checks text that is not."
+  (clerkenwell-test--with-images
+   (clerkenwell-test--with-buffer
+    (font-lock-mode 1)
+    (let ((clerkenwell-quiet t) (clerkenwell-show-images t))
+      (clerkenwell--rebuild-history
+       (clerkenwell-test--entries
+        "{:entries [{:kind :computation :source \"(draw)\" :text \"=> #<image 2×2>\" :presentation {:kind :image :text \"=> #<image 2×2>\"} :image \"/nonexistent.png\" :page-width 2 :delivery :inserted}]}"))
+      (font-lock-ensure)
+      (goto-char (point-min))
+      (search-forward "unreadable")
+      ;; What the display uses: our `font-lock-face', with no `face' from
+      ;; font-lock laid over it.
+      (should (eq 'font-lock-warning-face
+                  (get-text-property (1- (point)) 'font-lock-face)))
+      (should-not (get-text-property (1- (point)) 'face))))))
