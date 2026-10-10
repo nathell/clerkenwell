@@ -309,6 +309,13 @@
       (let [r (render/rasterize (stored 1404 70) out {:base-dir dir :max-width 1284 :max-height 1800})]
         (is (:ok? r))
         (is (= [1284 64] [(:width r) (:height r)]))))
+    (testing "given more room than a screen, as a scrollable page has, it is used"
+      (let [strict (render/rasterize (stored 600 1800 "(draw)") out
+                                     {:base-dir dir :max-width 1284 :max-height 1800})
+            roomy (render/rasterize (stored 600 1800 "(draw)") out
+                                    {:base-dir dir :max-width 1284 :max-height 5000})]
+        (is (= 1800 (:height strict)) "shrunk to the room")
+        (is (> (:height roomy) 1800) "the image at its full height, below its source")))
     (testing "an image shorter than that limit only needs its own height"
       (let [r (render/rasterize (stored 200 50) out {:base-dir dir :max-width 1284 :max-height 60})]
         (is (:ok? r))))))

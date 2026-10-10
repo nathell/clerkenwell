@@ -202,7 +202,8 @@
 
    `opts` may carry `:include-source? true` to write the expression above its
    result on the tablet. Emacs records both regardless; this only controls what
-   the page receives."
+   the page receives. `:strict-height? false` lets the result run below the
+   bottom of the screen, onto the part of a scrollable page you scroll to."
   ([source ns-name] (submit source ns-name nil))
   ([source ns-name opts]
     (let [s @session]
@@ -240,7 +241,9 @@
                                     :namespace ns-name
                                     :ink-bottom (ink/ink-bottom nb page)
                                     :outputs-bottom (when (pos? prev-bottom) prev-bottom)
-                                    :include-source? (boolean (:include-source? opts))})]
+                                    :include-source? (boolean (:include-source? opts))
+                                    :config (when (contains? opts :strict-height?)
+                                              {:strict-height? (boolean (:strict-height? opts))})})]
                (if-not (:ok? r)
                  r
                  ;; Evaluation is done and captured. Delivery happens in the

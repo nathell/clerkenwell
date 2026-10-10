@@ -541,7 +541,9 @@
   [presentation out-path {:keys [max-width max-height font font-size base-dir]
                           :or {font default-font font-size default-font-size}}]
   (let [max-width (min (or max-width page-width) page-width)
-        max-height (min (or max-height page-height) page-height)
+        ;; Not clamped to the screen: a scrollable page can be taller, and
+        ;; the caller says how much room there is.
+        max-height (or max-height page-height)
         opts {:max-width max-width :max-height max-height
               :font font :font-size font-size}
         out (io/file out-path)

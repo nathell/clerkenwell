@@ -176,6 +176,43 @@
       (is (= 320 (:dy r)))
       (is (= 420 (:bottom r))))))
 
+(deftest relaxed-height-lets-outputs-run-below-the-screen
+  (let [relaxed {:strict-height? false}]
+    (testing "what strict height refuses goes below the screen instead"
+      (let [r (placement/place {:ink-bottom 1700 :outputs-bottom nil
+                                :width 400 :height 400 :config relaxed})]
+        (is (:ok? r))
+        (is (= 1720 (:dy r)))
+        (is (= 2120 (:bottom r)) "past the 1872 of one screen")))
+    (testing "the next output follows on below it"
+      (is (= 2140 (placement/output-top 1700 2120 relaxed))))
+    (testing "handwriting already below the screen is cleared as usual"
+      (is (:ok? (placement/place {:ink-bottom 3000 :outputs-bottom nil
+                                  :width 400 :height 100 :config relaxed}))))
+    (testing "there is still a limit, so no one result is absurdly tall"
+      (is (= (- (* 10 1872) 20) (placement/max-bottom relaxed)))
+      (is (= :height (:axis (placement/place {:ink-bottom 18000 :outputs-bottom nil
+                                              :width 400 :height 1000 :config relaxed})))))
+    (testing "width is as strict as ever"
+      (is (= :width (:axis (placement/place {:ink-bottom nil :outputs-bottom nil
+                                             :width 1400 :height 100 :config relaxed})))))
+    (testing "strict is the default"
+      (is (= (- 1872 20) (placement/max-bottom nil))))))
+
+(deftest relaxed-height-end-to-end
+  (let [root (tmp-root)
+        tall "(vec (range 1000 1400))"
+        submit #(core/submit! (merge {:state-root root :notebook-id "nb-1" :page-id "page-1"
+                                      :source tall :namespace "user"
+                                      :ink-bottom 1500 :outputs-bottom nil}
+                                     %))]
+    (testing "strict: thirty-odd lines will not fit under ink at 1500"
+      (is (false? (:ok? (submit {})))))
+    (testing "relaxed: they go below the screen"
+      (let [r (submit {:config {:strict-height? false}})]
+        (is (:ok? r))
+        (is (> (get-in r [:placement :bottom]) 1872))))))
+
 (deftest strokes-bottom-uses-all-points
   (is (nil? (placement/strokes-bottom [])))
   (is (nil? (placement/strokes-bottom [{:points []}])))

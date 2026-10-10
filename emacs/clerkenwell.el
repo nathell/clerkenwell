@@ -74,6 +74,14 @@ page.  `clerkenwell-evaluate-and-send' inverts this for a single
 submission when given a prefix argument."
   :type 'boolean)
 
+(defcustom clerkenwell-strict-height t
+  "Whether a result must fit above the bottom of the screen.
+reMarkable pages can be scrolled to be taller than the screen.  When
+nil, a result that does not fit in what is left of the screen goes
+below it instead of being refused, and images are no longer shrunk to
+fit the room left."
+  :type 'boolean)
+
 (defcustom clerkenwell-ink-colors 'theme
   "Colours handwriting images are drawn in.
 
@@ -602,10 +610,11 @@ customised that variable the other way)."
             clerkenwell--status "evaluating…")
       (force-mode-line-update)
       (clerkenwell--eval-async
-       (format "(clerkenwell.session/submit %s %s {:include-source? %s})"
+       (format "(clerkenwell.session/submit %s %s {:include-source? %s :strict-height? %s})"
                (clerkenwell--clj-string source)
                (clerkenwell--clj-string clerkenwell--namespace)
-               (if with-source "true" "false"))
+               (if with-source "true" "false")
+               (if clerkenwell-strict-height "true" "false"))
        (lambda (result err)
          (setq clerkenwell--in-flight nil)
          (cond

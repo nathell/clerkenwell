@@ -162,8 +162,8 @@
                     raster (render/rasterize presentation tmp
                                              {:base-dir nb
                                               :max-width usable-w
-                                              :max-height (- (:page-height cfg)
-                                                             top (:bottom-margin cfg))})]
+                                              :max-height (- (placement/max-bottom cfg)
+                                                             top)})]
                 (if-not (:ok? raster)
                   (do (store/set-delivery! nb result-id :failed "insufficient-space")
                       {:ok? false :stage :render :result-id result-id

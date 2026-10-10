@@ -135,6 +135,12 @@ sends the result alone, and `clerkenwell-send-source` flips which of those is
 the default. Emacs records both either way -- this only controls what is
 written on the tablet.
 
+A result that does not fit in what is left of the screen is refused and stays
+pending. Pages can now be scrolled to be taller than the screen; set
+`clerkenwell-strict-height` to nil and such a result goes below the bottom of
+the screen instead, up to ten screens down, and images are no longer shrunk to
+the room left.
+
 The tunnel from step 2 is a separate SSH process and is unrelated to CIDER. It
 can be started before or after `clerkenwell-open`, and it survives a REPL
 restart -- after restarting, just run `clerkenwell-open` again. Conversely, if

@@ -163,6 +163,20 @@
       (is (.isAbsolute (io/file (:image e))))
       (is (= 1284 (:page-width e)) "as wide as the page allows, not the stored 1404"))))
 
+(deftest strict-height-reaches-placement
+  (let [root (str (tmp-root))
+        seen (atom [])]
+    (session/start! {:state-root root :ssh-host "no-host" :port port})
+    (report-identity!)
+    (with-redefs [transport/push-asset! (fn [& _])
+                  clerkenwell.core/submit! (let [orig clerkenwell.core/submit!]
+                                             (fn [args] (swap! seen conj (:config args)) (orig args)))]
+      (session/submit "1" "user" {:strict-height? false})
+      (session/submit "2" "user" {:strict-height? true})
+      (session/submit "3" "user"))
+    (is (= [{:strict-height? false} {:strict-height? true} nil] @seen)
+        "passed on when given; otherwise placement's default stands")))
+
 (deftest history-interleaves-ink-and-computation
   (let [root (str (tmp-root))
         nb (store/notebook-dir root doc)

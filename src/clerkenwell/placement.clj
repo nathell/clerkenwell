@@ -21,7 +21,23 @@
    :top-margin 60
    :page-width 1404
    :page-height 1872
-   :bottom-margin 20})
+   :bottom-margin 20
+   ;; Whether an output must end above the bottom of the screen. Pages can
+   ;; now be scrolled to be taller than the screen; off, an output may run
+   ;; below it, as far as `scroll-limit` screens down.
+   :strict-height? true
+   :scroll-limit 10})
+
+(defn max-bottom
+  "The lowest y an output may reach: the bottom of the screen less its margin
+   with :strict-height?, otherwise :scroll-limit screens down. The limit only
+   keeps one result from making an absurdly tall image."
+  [config]
+  (let [{:keys [page-height bottom-margin strict-height? scroll-limit]}
+        (merge default-config config)]
+    (if strict-height?
+      (- page-height bottom-margin)
+      (- (* scroll-limit page-height) bottom-margin))))
 
 ;; Verified on device 2026-09-18: insertImageFileAsSceneItem takes the image
 ;; CENTRE in scene coordinates, the page is 1404 wide centred on x=0 (left edge
@@ -59,23 +75,25 @@
 
    Returns {:ok? true :dx :dy :bottom} or, when it will not fit the supported
    page area, {:ok? false :reason :insufficient-space ...}. It never overlaps
-   ink, shrinks text, inserts off-screen, creates pages or retargets -- the
-   caller keeps the result pending instead."
+   ink, shrinks text, creates pages or retargets -- the caller keeps the result
+   pending instead. With :strict-height? off it may place an output below the
+   bottom of the screen, on the part of the page you scroll to."
   [{:keys [ink-bottom outputs-bottom width height config]}]
   (let [cfg (merge default-config config)
-        {:keys [left-margin page-width page-height bottom-margin]} cfg
+        {:keys [left-margin page-width]} cfg
         dy (output-top ink-bottom outputs-bottom cfg)
         dx left-margin
         bottom (+ dy height)
-        usable-width (- page-width (* 2 left-margin))]
+        usable-width (- page-width (* 2 left-margin))
+        lowest (max-bottom cfg)]
     (cond
       (> width usable-width)
       {:ok? false :reason :insufficient-space :axis :width
        :width width :usable usable-width}
 
-      (> bottom (- page-height bottom-margin))
+      (> bottom lowest)
       {:ok? false :reason :insufficient-space :axis :height
-       :bottom bottom :usable (- page-height bottom-margin)}
+       :bottom bottom :usable lowest}
 
       :else
       {:ok? true :dx dx :dy dy :bottom bottom})))
