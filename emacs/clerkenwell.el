@@ -538,6 +538,16 @@ NAMESPACE is the namespace submissions are evaluated in."
       (clerkenwell-check-device))
     (pop-to-buffer buf)))
 
+(defun clerkenwell--copy-description (copy)
+  "How the tablet's copy of the session stands, from COPY, in words."
+  (let ((pending (clerkenwell--get copy :pending)))
+    (cond ((null copy) "copy unknown")
+          ((not (clerkenwell--get copy :ok?))
+           (format "copy on tablet FAILING (%s)" (clerkenwell--get copy :message)))
+          ((and (numberp pending) (> pending 0))
+           (format "copy on tablet %d file%s behind" pending (if (= pending 1) "" "s")))
+          (t "copy on tablet ok"))))
+
 (defun clerkenwell-check-device ()
   "Report on both paths to the device, which fail independently.
 
@@ -548,16 +558,18 @@ line looks healthy."
   (interactive)
   (let* ((r (clerkenwell--eval-sync "(clerkenwell.session/check-device)"))
          (tunnel (and r (clerkenwell--get r :tunnel)))
-         (ssh (and r (clerkenwell--get r :ssh))))
+         (ssh (and r (clerkenwell--get r :ssh)))
+         (copy (and r (clerkenwell--get r :copy))))
     (if (null r)
         (message "Clerkenwell: not connected")
       (let ((tunnel-ok (clerkenwell--get tunnel :ok?))
             (ssh-ok (clerkenwell--get ssh :ok?)))
         (message
-         "Clerkenwell: tunnel %s, ssh(%s) %s%s"
+         "Clerkenwell: tunnel %s, ssh(%s) %s, %s%s"
          (if tunnel-ok "ok" "DOWN")
          (clerkenwell--get ssh :host)
          (if ssh-ok "ok" "FAILING")
+         (clerkenwell--copy-description copy)
          (cond
           ((and tunnel-ok (not ssh-ok))
            (format " — results will insert but handwriting will not arrive: %s"
@@ -581,12 +593,17 @@ line looks healthy."
               (let* ((active (clerkenwell--get s :active))
                      (page (and active (clerkenwell--name
                                         (clerkenwell--get active :page))))
-                     (uncertain (clerkenwell--get s :uncertain)))
+                     (uncertain (clerkenwell--get s :uncertain))
+                     (copy (clerkenwell--get s :copy)))
                 (concat (if (and page (not (string-empty-p page)))
                             (format "page %s" (substring page 0 (min 8 (length page))))
                           "no page")
                         (when (and uncertain (> (length uncertain) 0))
-                          (format " ⚠%d uncertain" (length uncertain)))))
+                          (format " ⚠%d uncertain" (length uncertain)))
+                        ;; History is kept on the tablet too; say when it
+                        ;; is not reaching it.
+                        (when (and copy (not (clerkenwell--get copy :ok?)))
+                          " ⚠not copied to tablet")))
             "not running"))
     (force-mode-line-update)))
 

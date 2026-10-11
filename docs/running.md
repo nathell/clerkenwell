@@ -206,6 +206,20 @@ belongs to the document on the tablet, not to the code (see
 `docs/sessions.md`). Within it, `handwriting/` and `manifest.edn` are derived
 and can be deleted; they are rebuilt when the notebook is next opened.
 
+Each notebook's history is also kept on the tablet, under
+`/home/root/clerkenwell/<notebook-uuid>/`. When the tablet opens a notebook,
+anything the tablet has that this computer lacks is fetched; from then on,
+new history is copied to it every couple of seconds, and in full on
+`clerkenwell-disconnect`. A result is only inserted once its attempt has
+reached the tablet's copy, so another computer can never insert it a second
+time. `C-c C-d` reports how the copy stands, and the mode line says
+`⚠not copied to tablet` when it is failing. Only one computer should be
+connected at a time, for now.
+
+`clerkenwell-reset-history` sets the tablet's copy aside as well, and refuses
+if it cannot reach the tablet: otherwise the next attach would fetch the
+whole history back.
+
 Two separate things decide what you see:
 
 - **Entries from earlier sessions** live in `<state-root>/<notebook-uuid>/`.

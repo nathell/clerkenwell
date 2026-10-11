@@ -178,7 +178,13 @@
                :when (contains? (store/read-manifest d) result-id)]
            d)))
 
-(defn- handle-attempt [state-root {:keys [id doc page instance]}]
+(defn- handle-attempt
+  "Record the attempt, durably, before authorizing it. `:on-attempt`, when
+   configured, is called with the notebook directory once the attempt is in
+   the local log, and must return {:ok? true} for the call to be authorized:
+   it is how the attempt reaches the device's copy of the session first, so
+   that whatever may be on the page is always in the log there."
+  [state-root {:keys [on-attempt]} {:keys [id doc page instance]}]
   (let [nb (notebook-holding state-root id)
         r (when nb (get (store/read-manifest nb) id))
         state (get-in r [:delivery :state])]
@@ -190,8 +196,17 @@
       (do
         ;; Durable BEFORE the 200 that authorizes the call.
         (store/set-delivery! nb id :insertion-started instance)
-        (println (format "== attempt recorded for %s (durable)" id))
-        [200 "ok"]))))
+        (let [copied (if on-attempt (on-attempt nb) {:ok? true})]
+          (if (:ok? copied)
+            (do (println (format "== attempt recorded for %s (durable)" id))
+                [200 "ok"])
+            ;; Not authorized, so not inserted. Failed rather than pending
+            ;; again, or the adapter would retry it every second.
+            (do (store/set-delivery! nb id :failed
+                                     (str "could not record the attempt on the device: "
+                                          (:message copied)))
+                (println (format "!! attempt for %s not recorded on the device" id))
+                [503 "not recorded on the device"])))))))
 
 (defn- handle-ack [state-root {:keys [id status detail instance]}]
   (let [nb (notebook-holding state-root id)
@@ -212,7 +227,7 @@
                          id status new-state (if (seq detail) (str "(" detail ")") "")))
         [200 "ok"]))))
 
-(defn- handler [state-root]
+(defn- handler [state-root config]
   (reify HttpHandler
     (handle [_ ex]
       (let [uri (.getPath (.getRequestURI ex))
@@ -220,7 +235,7 @@
             [status body] (try
                             (case uri
                               "/command" (handle-command state-root p)
-                              "/attempt" (handle-attempt state-root p)
+                              "/attempt" (handle-attempt state-root config p)
                               "/ack"     (handle-ack state-root p)
                               [404 "no"])
                             (catch Throwable e
@@ -243,7 +258,7 @@
       (println "   It may or may not be on the page. Inspect, then reconcile."))
     (let [server (HttpServer/create (InetSocketAddress. "127.0.0.1" (int port)) 0)]
       (doseq [path ["/command" "/attempt" "/ack"]]
-        (.createContext server path (handler state-root)))
+        (.createContext server path (handler state-root config)))
       (.setExecutor server nil)
       (.start server)
       (println (format "clerkenwell transport on 127.0.0.1:%d" port))

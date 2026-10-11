@@ -26,6 +26,15 @@
   (reset! transport/active-page
           {:doc doc :page page :instance "test" :at (System/currentTimeMillis)}))
 
+(defn- eventually
+  "Whether `pred` holds within a few seconds: the device's copy is kept up to
+   date in the background."
+  [pred]
+  (loop [n 0]
+    (cond (pred) true
+          (> n 50) false
+          :else (do (Thread/sleep 100) (recur (inc n))))))
+
 (use-fixtures :each (fn [f]
                       (session/stop!)
                       (reset! transport/active-page nil)
@@ -267,20 +276,63 @@
 
 (deftest archive-sets-history-aside-without-destroying-it
   (let [root (str (tmp-root))
+        device (str (tmp-root))
         nb (store/notebook-dir root doc)
         bs (Files/readAllBytes (.toPath (io/file "test/resources/sample-page.rm")))]
-    (session/start! {:state-root root :ssh-host "no-host" :port port})
+    (session/start! {:state-root root :ssh-host "no-host" :port port
+                     :device {:local-root device}})
     (report-identity!)
     (ink/observe! nb {:page-id page :rm-bytes bs :strokes (:strokes (lines/parse bs))})
     (session/submit "(+ 1 2)" "user")
     (is (seq (:entries (session/history))))
+    (is (eventually #(.exists (io/file device doc "events"))))
     (let [r (session/archive-notebook!)]
       (is (:ok? r))
       (testing "the old history still exists on disk"
         (is (.isDirectory (io/file (:archived r))))
         (is (.exists (io/file (:archived r) "manifest.edn"))))
       (testing "and the live notebook directory is gone"
-        (is (not (.exists nb)))))))
+        (is (not (.exists nb))))
+      (testing "on the device too, where it is set aside the same way"
+        (is (not (.exists (io/file device doc))))
+        (is (= 1 (count (filter #(.startsWith (.getName %) (str doc ".archived-"))
+                                (.listFiles (io/file device))))))))))
+
+(deftest archive-is-refused-when-the-device-copy-cannot-be-moved
+  (testing "or attaching again would fetch the whole history back"
+    (let [root (str (tmp-root))
+          nb (store/notebook-dir root doc)]
+      (session/start! {:state-root root :ssh-host "definitely-no-such-host" :port port})
+      (report-identity!)
+      (session/submit "(+ 1 2)" "user")
+      (let [r (session/archive-notebook!)]
+        (is (false? (:ok? r)))
+        (is (re-find #"device" (:message r)))
+        (is (.exists nb) "the local history is untouched")))))
+
+(deftest another-computer-continues-the-session
+  (let [device (str (tmp-root))
+        here (str (tmp-root))
+        there (str (tmp-root))]
+    (session/start! {:state-root here :ssh-host "no-host" :port port
+                     :device {:local-root device}})
+    (report-identity!)
+    (is (:ok? (session/submit "(+ 1 2)" "user")))
+    (testing "disconnecting sends what the device does not have yet"
+      (session/stop!)
+      (is (.exists (io/file device doc "events"))))
+    (session/start! {:state-root there :ssh-host "no-host" :port (next-port)
+                     :device {:local-root device}})
+    (report-identity!)
+    (is (:ok? (session/submit "(* 6 7)" "user")))
+    (testing "the other computer's history is there, then this one's"
+      (is (= ["(+ 1 2)" "(* 6 7)"]
+             (map :source (filter #(= :computation (:kind %))
+                                  (:entries (session/history)))))))
+    (testing "and the device has both"
+      (session/stop!)
+      (is (= 2 (count (filter #(= :result-created (:event %))
+                              (store/read-events (io/file device doc)))))))))
 
 (deftest archive-without-a-notebook-is-not-an-error
   (let [root (str (tmp-root))]

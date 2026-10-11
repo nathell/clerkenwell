@@ -315,9 +315,6 @@ separator, header and all."
    (should (equal "(my-draft)" (clerkenwell-draft)))
    (should (= 1 (how-many ";; Clerkenwell" (point-min) (point-max))))))
 
-(provide 'clerkenwell-test)
-;;; clerkenwell-test.el ends here
-
 (ert-deftest clerkenwell-test-hidden-value ()
   "A hidden value says so, and needs no delivery note to explain itself."
   (clerkenwell-test--with-buffer
@@ -409,3 +406,15 @@ colours through the buffer's own font-lock."
 (ert-deftest clerkenwell-test-fontify-without-the-mode ()
   "Without the mode, the text is just the text."
   (should (equal "# Hi" (clerkenwell--fontify "# Hi" 'clerkenwell-no-such-mode))))
+
+(ert-deftest clerkenwell-test-copy-description ()
+  (should (equal "copy on tablet ok"
+                 (clerkenwell--copy-description (parseedn-read-str "{:ok? true :pending 0}"))))
+  (should (equal "copy on tablet 2 files behind"
+                 (clerkenwell--copy-description (parseedn-read-str "{:ok? true :pending 2}"))))
+  (should (string-match-p "FAILING (asleep)"
+                          (clerkenwell--copy-description
+                           (parseedn-read-str "{:ok? false :message \"asleep\"}")))))
+
+(provide 'clerkenwell-test)
+;;; clerkenwell-test.el ends here

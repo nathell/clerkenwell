@@ -20,6 +20,7 @@
             [clojure.string :as str]
             [clerkenwell.core :as core]
             [clerkenwell.ink :as ink]
+            [clerkenwell.mirror :as mirror]
             [clerkenwell.placement :as placement]
             [clerkenwell.store :as store]
             [clerkenwell.transport :as transport]
@@ -38,8 +39,11 @@
 (defonce ^:private evaluating (atom false))
 
 (def default-options
-  ;; :state-root nil means `store/default-root`.
+  ;; :state-root nil means `store/default-root`. :device nil means the
+  ;; device's copy is reached over SSH at :ssh-host; tests give
+  ;; {:local-root dir} instead.
   {:state-root nil
+   :device nil
    :port 14242
    :identity-max-age-ms 5000})
 
@@ -101,6 +105,22 @@
     (.setName (str "clerkenwell-deliver-" result-id))
     (.start)))
 
+(defn- device
+  "Where the device's copy of sessions is reached."
+  [s]
+  (or (:device s) {:ssh-host (:ssh-host s)}))
+
+(defn- record-on-device!
+  "Bring the device's copy of the session in `nb` up to date, now: called as
+   an insertion is about to be authorized."
+  [nb]
+  (let [s @connection
+        m (:mirror s)
+        m (if (and m (= (.getCanonicalFile (io/file nb)) (.getCanonicalFile (:nb m))))
+            m
+            (mirror/mirror nb (.getName (io/file nb)) (device s)))]
+    (mirror/flush! m)))
+
 (defn start!
   "Start the transport server and, once the device reports which notebook is
    open, the handwriting watcher.
@@ -116,9 +136,13 @@
     (let [{:keys [port] :as opts} (merge default-options opts)
           state-root (.getAbsolutePath (io/file (or (:state-root opts)
                                                     (store/default-root))))
-          server (transport/start! state-root {:port port})
+          server (transport/start! state-root {:port port
+                                               :on-attempt #(record-on-device! %)})
           stop? (atom false)]
       (reset! connection (assoc opts :state-root state-root
+                                ;; Identifies this connection, so a thread
+                                ;; of an earlier one cannot write into it.
+                                :token (Object.)
                                 :server server :watcher nil :notebook-id nil
                                 :identity-stop stop?))
       (start-identity-poller! stop?)
@@ -130,24 +154,65 @@
   (when-let [s @connection]
     (when-let [stop? (:identity-stop s)] (reset! stop? true))
     (when-let [stop? (:watcher s)] (reset! stop? true))
+    (when-let [stop? (:mirror-stop s)] (reset! stop? true))
+    ;; What has not reached the device yet goes now, so another computer
+    ;; can continue from here.
+    (when-let [m (:mirror s)] (mirror/flush! m))
     (transport/stop! (:server s))
     (reset! connection nil)
     {:ok? true}))
 
+(defn- detach!
+  "Stop watching and copying the notebook connection `s` is attached to. Its
+   history is untouched. A connection that is no longer the current one is
+   left as it is."
+  [s]
+  (when-let [stop? (:watcher s)] (reset! stop? true))
+  (when-let [stop? (:mirror-stop s)] (reset! stop? true))
+  (when-let [m (:mirror s)] (mirror/close! m))
+  (swap! connection #(if (and % (identical? (:token %) (:token s)))
+                       (assoc % :watcher nil :mirror nil :mirror-stop nil :notebook-id nil)
+                       %)))
+
+(def ^:private attach-lock
+  "Serialises attaching to a notebook with setting its history aside, so the
+   identity poller cannot re-attach -- and copy everything back to the device
+   -- between the two halves of an archive."
+  (Object.))
+
 (defn- ensure-watching!
-  "Start or move the watcher when the device reports a notebook.
+  "Attach to a notebook when the device reports it: fetch what the device's
+   copy has that this computer does not, then watch it and keep the copy up
+   to date.
 
    Handwriting images are derived, so any that are missing -- the cache was
    cleared, or the history was recorded elsewhere -- are redrawn first, before
    the notebook becomes the one history is read from."
   [notebook-id]
-  (let [s @connection]
-    (when (and s (not= notebook-id (:notebook-id s)))
-      (when-let [stop? (:watcher s)] (reset! stop? true))
-      (ink/restore! (store/notebook-dir (:state-root s) notebook-id) (:render-opts s))
-      (swap! connection assoc
-             :watcher (start-watcher! s notebook-id)
-             :notebook-id notebook-id))))
+  (locking attach-lock
+    (let [s @connection]
+      (when (and s (not= notebook-id (:notebook-id s)))
+        (detach! s)
+        (let [nb (store/notebook-dir (:state-root s) notebook-id)
+              m (mirror/mirror nb notebook-id (device s))]
+          ;; A failed pull is reported in the status; the local history is
+          ;; still there to work with.
+          (mirror/pull! m)
+          (ink/restore! nb (:render-opts s))
+          ;; The connection may have been stopped, and another started,
+          ;; while this one was fetching. Attach only to the one asked.
+          (let [watcher (start-watcher! s notebook-id)
+                mirror-stop (mirror/start! m)
+                same? #(identical? (:token %) (:token s))
+                after (swap! connection #(if (same? %)
+                                           (assoc % :watcher watcher :mirror m
+                                                  :mirror-stop mirror-stop
+                                                  :notebook-id notebook-id)
+                                           %))]
+            (when-not (same? after)
+              (reset! watcher true)
+              (reset! mirror-stop true)
+              (mirror/close! m))))))))
 
 ;; -------- what the device says is open --------
 
@@ -179,7 +244,10 @@
                 :message (if reported
                            (str "device reports page " (:page reported))
                            "no recent report from the adapter; check the tunnel and xovi")}
-       :ssh (assoc ssh :host (:ssh-host s))})
+       :ssh (assoc ssh :host (:ssh-host s))
+       :copy (if-let [m (:mirror s)]
+               (mirror/status m)
+               {:ok? true :pending nil :message "no notebook attached"})})
     {:running? false}))
 
 (defn status
@@ -196,6 +264,8 @@
        :notebook-id (:notebook-id s)
        :active live
        :evaluating? @evaluating
+       ;; The device's copy of the session: {:ok? :pending :message}.
+       :copy (some-> (:mirror s) mirror/status)
        :deliveries (frequencies (keep #(get-in % [:delivery :state]) (vals m)))
        :uncertain (vec (for [[id r] m
                              :when (= :uncertain (get-in r [:delivery :state]))]
@@ -305,28 +375,36 @@
    that quietly destroyed it would be at odds with the whole point. The archived
    directory keeps its assets and event log and can be moved back.
 
+   The device's copy is set aside first, the same way; if that cannot be
+   done, nothing is archived, since the next attach would fetch it all back.
+
    Note this only clears what the HOST remembers. Ink already on the page will
    be observed again as a fresh initial entry, because that is what a first
    observation means -- and it is what keeps placement below it correct. For a
    genuinely blank slate, start on a blank page too."
   []
-  (if-let [s @connection]
-    (if-let [id (:notebook-id s)]
-      (let [nb (store/notebook-dir (:state-root s) id)
-            stamp (.format (java.time.format.DateTimeFormatter/ofPattern
-                            "yyyyMMdd-HHmmss")
-                           (java.time.LocalDateTime/now))
-            dest (io/file (:state-root s) (str id ".archived-" stamp))]
-        ;; Stop the watcher first: it holds the digests it has already seen, so
-        ;; leaving it running would skip re-observing the page.
-        (when-let [stop? (:watcher s)] (reset! stop? true))
-        (swap! connection assoc :watcher nil :notebook-id nil)
-        (cond
-          (not (.exists nb)) {:ok? true :archived nil :message "no history to archive"}
-          (.renameTo nb dest) {:ok? true :archived (.getAbsolutePath dest)}
-          :else {:ok? false :message (str "could not rename " nb)}))
-      {:ok? false :message "no notebook linked"})
-    {:ok? false :message "not connected"}))
+  (locking attach-lock
+    (if-let [s @connection]
+      (if-let [id (:notebook-id s)]
+        (let [nb (store/notebook-dir (:state-root s) id)
+              stamp (.format (java.time.format.DateTimeFormatter/ofPattern
+                              "yyyyMMdd-HHmmss")
+                             (java.time.LocalDateTime/now))
+              dest (io/file (:state-root s) (str id ".archived-" stamp))]
+          ;; Stop the watcher first: it holds the digests it has already seen,
+          ;; so leaving it running would skip re-observing the page. And stop
+          ;; copying, or a flush could recreate what is about to be moved.
+          (detach! s)
+          (let [device-copy (mirror/archive! id (device s) stamp)]
+            (cond
+              (not (:ok? device-copy))
+              {:ok? false :message (str "could not set aside the device's copy: "
+                                        (:message device-copy))}
+              (not (.exists nb)) {:ok? true :archived nil :message "no history to archive"}
+              (.renameTo nb dest) {:ok? true :archived (.getAbsolutePath dest)}
+              :else {:ok? false :message (str "could not rename " nb)})))
+        {:ok? false :message "no notebook linked"})
+      {:ok? false :message "not connected"})))
 
 (defn set-render-opts!
   "Change how handwriting is drawn -- colours, resolution -- and redraw what
@@ -341,9 +419,7 @@
     (let [merged (merge (:render-opts s) opts)]
       (swap! connection assoc :render-opts merged)
       ;; The running watcher captured the old options; restart it.
-      (when-let [id (:notebook-id s)]
-        (when-let [stop? (:watcher s)] (reset! stop? true))
-        (swap! connection assoc :watcher nil :notebook-id nil))
+      (when (:notebook-id s) (detach! s))
       (let [redrawn (when-let [id (:notebook-id s)]
                       (ink/rerender! (store/notebook-dir (:state-root s) id) nil merged))]
         {:ok? true :render-opts merged :rerendered (count (:rendered redrawn))}))

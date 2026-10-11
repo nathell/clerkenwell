@@ -166,3 +166,36 @@
               body (.body (.send c req (HttpResponse$BodyHandlers/ofString)))]
           (is (= "{}" body)))
         (finally (transport/stop! server))))))
+
+(deftest an-attempt-reaches-the-device-before-it-is-authorized
+  (let [root (tmp-root)
+        doc "nb-5" page "page-5"
+        [nb id] (submitted root doc page)
+        seen (atom nil)
+        server (transport/start! root {:port (+ port 4)
+                                       :on-attempt (fn [d]
+                                                     (reset! seen (state d id))
+                                                     {:ok? true})})]
+    (try
+      (let [[status _] (http-get (+ port 4) (str "/attempt?id=" id "&doc=" doc
+                                                 "&page=" page "&instance=i1"))]
+        (is (= 200 status))
+        (is (= :insertion-started @seen)
+            "the hook sees the attempt already in the log it is to copy"))
+      (finally (transport/stop! server)))))
+
+(deftest an-attempt-the-device-did-not-get-is-not-authorized
+  (let [root (tmp-root)
+        doc "nb-6" page "page-6"
+        [nb id] (submitted root doc page)
+        server (transport/start! root {:port (+ port 5)
+                                       :on-attempt (fn [_] {:ok? false :message "asleep"})})]
+    (try
+      (let [[status _] (http-get (+ port 5) (str "/attempt?id=" id "&doc=" doc
+                                                 "&page=" page "&instance=i1"))]
+        (is (= 503 status))
+        (testing "it fails, rather than being offered again every second"
+          (is (= :failed (state nb id)))
+          (let [[_ body] (http-get (+ port 5) (str "/command?doc=" doc "&page=" page))]
+            (is (= "{}" body)))))
+      (finally (transport/stop! server)))))
