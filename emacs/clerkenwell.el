@@ -30,9 +30,14 @@
   :group 'clojure
   :prefix "clerkenwell-")
 
-(defcustom clerkenwell-state-root "clerkenwell-state"
-  "Directory holding notebook history, relative to the REPL's working directory."
-  :type 'string)
+(defcustom clerkenwell-state-root nil
+  "Directory holding notebook history, or nil for the default.
+
+The default is a cache outside any project, $XDG_CACHE_HOME/clerkenwell
+or ~/.cache/clerkenwell, since a notebook's history belongs to the
+document on the tablet rather than to the code.  A relative name is
+relative to the REPL's working directory."
+  :type '(choice (const :tag "Default" nil) directory))
 
 (defcustom clerkenwell-ssh-host "rm"
   "SSH host for the reMarkable: an alias from your SSH config, or a hostname."
@@ -344,7 +349,7 @@ the page."
            (let ((pw (clerkenwell--get entry :page-width)))
              (if pw
                  (clerkenwell--insert-sized-image asset pw)
-               ;; A session older than this buffer, which does not report
+               ;; A clerkenwell.session older than this buffer, which does not report
                ;; sizes: assume the image was drawn at page resolution.
                (insert-image (create-image asset nil nil
                                            :scale clerkenwell-image-scale))))
@@ -500,7 +505,7 @@ text, point and mark are restored around the rewrite."
 
 ;;;###autoload
 (defun clerkenwell-open (namespace)
-  "Open the Clerkenwell buffer, starting a session in the current REPL.
+  "Open the Clerkenwell buffer, connecting the current REPL to the tablet.
 NAMESPACE is the namespace submissions are evaluated in."
   (interactive (list (cider-read-from-minibuffer
                       "Evaluate submissions in namespace: " (cider-current-ns))))
@@ -513,7 +518,9 @@ NAMESPACE is the namespace submissions are evaluated in."
       (clerkenwell-mode 1)
       (let* ((started (clerkenwell--eval-sync
                        (format "(do (require 'clerkenwell.session) (clerkenwell.session/start! {:state-root %s :ssh-host %s :port %d :render-opts %s}))"
-                               (clerkenwell--clj-string clerkenwell-state-root)
+                               (if clerkenwell-state-root
+                                   (clerkenwell--clj-string clerkenwell-state-root)
+                                 "nil")
                                (clerkenwell--clj-string (clerkenwell--ssh-destination))
                                clerkenwell-port
                                (clerkenwell--render-opts)))))
@@ -522,10 +529,10 @@ NAMESPACE is the namespace submissions are evaluated in."
         ;; "already running" there would hide a real problem.
         (unless started
           (user-error
-           "Clerkenwell: could not start a session. Is clerkenwell.session on the classpath?"))
+           "Clerkenwell: could not connect. Is clerkenwell.session on the classpath?"))
         (setq clerkenwell--status
               (if (clerkenwell--get started :already-running?)
-                  "reusing session" "started")))
+                  "reusing connection" "started")))
       (clerkenwell-refresh)
       (clerkenwell--start-polling)
       (clerkenwell-check-device))
@@ -543,7 +550,7 @@ line looks healthy."
          (tunnel (and r (clerkenwell--get r :tunnel)))
          (ssh (and r (clerkenwell--get r :ssh))))
     (if (null r)
-        (message "Clerkenwell: no session")
+        (message "Clerkenwell: not connected")
       (let ((tunnel-ok (clerkenwell--get tunnel :ok?))
             (ssh-ok (clerkenwell--get ssh :ok?)))
         (message

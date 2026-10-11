@@ -293,6 +293,26 @@
       (is (empty? (:rendered out)))
       (is (= [(:entry-id r)] (:skipped out))))))
 
+(deftest restore-redraws-only-missing-images
+  (let [nb (tmp-nb)
+        line (subvec (inked) 0 22)
+        [a] (observe-in-two-saves! nb (subvec line 0 11) line)
+        r (ink/observe! nb {:page-id "page-2" :rm-bytes (fixture-bytes) :strokes (strokes)})
+        kept (store/handwriting-file nb (:entry-id r))
+        kept-at (.lastModified kept)]
+    (testing "a complete cache needs nothing"
+      (is (= {:rendered [] :skipped []} (ink/restore! nb nil))))
+    (testing "a cleared cache is drawn again, at the paths history names"
+      (doseq [f (.listFiles (io/file nb "handwriting"))
+              :when (not= f kept)]
+        (io/delete-file f))
+      (is (= [(:entry-id a)] (:rendered (ink/restore! nb nil))))
+      (is (every? #(.exists (io/file nb (get-in % [:asset :path])))
+                  (ink/entry-groups (filter #(#{:ink-observed :ink-joined} (:event %))
+                                            (store/read-events nb))))))
+    (testing "an image that was there is left alone"
+      (is (= kept-at (.lastModified kept))))))
+
 (deftest pages-are-independent
   (let [nb (tmp-nb)
         bs (fixture-bytes)]

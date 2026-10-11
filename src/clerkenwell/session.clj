@@ -10,7 +10,12 @@
    Everything Emacs needs is here. `clerkenwell.main` remains only as a
    development driver for exercising the device without a project.
 
-   One session owns one notebook and is the single writer of its store."
+   The state held here is this REPL's *connection* to the tablet: the
+   transport server, the identity poller and the handwriting watcher. It lasts
+   as long as the JVM. A *session* is a notebook's history, kept in the store
+   and keyed by the notebook's id; the connection serves whichever session the
+   tablet has open, and is the single writer of its store. See
+   docs/sessions.md."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [clerkenwell.core :as core]
@@ -20,7 +25,7 @@
             [clerkenwell.transport :as transport]
             [clerkenwell.watch :as watch]))
 
-(defonce ^:private session (atom nil))
+(defonce ^:private connection (atom nil))
 
 (defn- usable-width
   "Page units between the margins, the widest a result can be."
@@ -33,7 +38,8 @@
 (defonce ^:private evaluating (atom false))
 
 (def default-options
-  {:state-root "clerkenwell-state"
+  ;; :state-root nil means `store/default-root`.
+  {:state-root nil
    :port 14242
    :identity-max-age-ms 5000})
 
@@ -102,36 +108,44 @@
    `:ssh-host` is a normal SSH host alias. `:on-ink` is called with each new
    handwriting observation, which is how the Emacs buffer learns about it."
   [opts]
-  (if-let [s @session]
+  (if-let [s @connection]
     ;; Idempotent rather than throwing: re-opening the Emacs buffer against a
-    ;; live session is ordinary, and a thrown exception here is indistinguishable
+    ;; live connection is ordinary, and a thrown exception here is indistinguishable
     ;; from a real failure once it has crossed nREPL as an error.
     {:ok? true :already-running? true :port (:port s) :state-root (:state-root s)}
-    (let [{:keys [state-root port] :as opts} (merge default-options opts)
+    (let [{:keys [port] :as opts} (merge default-options opts)
+          state-root (.getAbsolutePath (io/file (or (:state-root opts)
+                                                    (store/default-root))))
           server (transport/start! state-root {:port port})
           stop? (atom false)]
-      (reset! session (assoc opts :server server :watcher nil :notebook-id nil
-                             :identity-stop stop?))
+      (reset! connection (assoc opts :state-root state-root
+                                :server server :watcher nil :notebook-id nil
+                                :identity-stop stop?))
       (start-identity-poller! stop?)
       {:ok? true :already-running? false :port port :state-root state-root})))
 
 (defn stop!
   "Stop the server and watcher. History and pending deliveries are untouched."
   []
-  (when-let [s @session]
+  (when-let [s @connection]
     (when-let [stop? (:identity-stop s)] (reset! stop? true))
     (when-let [stop? (:watcher s)] (reset! stop? true))
     (transport/stop! (:server s))
-    (reset! session nil)
+    (reset! connection nil)
     {:ok? true}))
 
 (defn- ensure-watching!
-  "Start or move the watcher when the device reports a notebook."
+  "Start or move the watcher when the device reports a notebook.
+
+   Handwriting images are derived, so any that are missing -- the cache was
+   cleared, or the history was recorded elsewhere -- are redrawn first, before
+   the notebook becomes the one history is read from."
   [notebook-id]
-  (let [s @session]
+  (let [s @connection]
     (when (and s (not= notebook-id (:notebook-id s)))
       (when-let [stop? (:watcher s)] (reset! stop? true))
-      (swap! session assoc
+      (ink/restore! (store/notebook-dir (:state-root s) notebook-id) (:render-opts s))
+      (swap! connection assoc
              :watcher (start-watcher! s notebook-id)
              :notebook-id notebook-id))))
 
@@ -142,7 +156,7 @@
    too old to believe. A submission aimed at a guess is worse than no
    submission, so this is deliberately strict."
   []
-  (when-let [s @session]
+  (when-let [s @connection]
     (transport/fresh-identity (:identity-max-age-ms s))))
 
 (defn check-device
@@ -152,7 +166,7 @@
    this JVM, so a page can be reported while every ssh here is failing. The
    watcher and asset pushes shell out to ssh and need working credentials."
   []
-  (if-let [s @session]
+  (if-let [s @connection]
     (let [reported (active)
           ssh (try
                 (let [{:keys [exit out err]}
@@ -171,7 +185,7 @@
 (defn status
   "Everything the Emacs buffer needs to render its status line."
   []
-  (if-let [s @session]
+  (if-let [s @connection]
     (let [live (active)
           nb (when (:notebook-id s)
                (store/notebook-dir (:state-root s) (:notebook-id s)))
@@ -206,13 +220,13 @@
    bottom of the screen, onto the part of a scrollable page you scroll to."
   ([source ns-name] (submit source ns-name nil))
   ([source ns-name opts]
-    (let [s @session]
+    (let [s @connection]
      (cond
        (nil? s)
-       {:ok? false :stage :session :message "no Clerkenwell session; call start! first"}
+       {:ok? false :stage :connection :message "not connected; call start! first"}
 
        (not (compare-and-set! evaluating false true))
-       {:ok? false :stage :session :message "an evaluation is already in flight"}
+       {:ok? false :stage :connection :message "an evaluation is already in flight"}
 
        :else
        (try
@@ -263,11 +277,11 @@
 ;; -------- delivery, without evaluating again --------
 
 (defn- with-notebook [f]
-  (if-let [s @session]
+  (if-let [s @connection]
     (if-let [id (:notebook-id s)]
       (f (store/notebook-dir (:state-root s) id))
       {:ok? false :message "no notebook linked yet"})
-    {:ok? false :message "no Clerkenwell session"}))
+    {:ok? false :message "not connected"}))
 
 (defn retry-delivery
   "Resume a definitely-uninserted result with its existing id and asset."
@@ -296,7 +310,7 @@
    observation means -- and it is what keeps placement below it correct. For a
    genuinely blank slate, start on a blank page too."
   []
-  (if-let [s @session]
+  (if-let [s @connection]
     (if-let [id (:notebook-id s)]
       (let [nb (store/notebook-dir (:state-root s) id)
             stamp (.format (java.time.format.DateTimeFormatter/ofPattern
@@ -306,13 +320,13 @@
         ;; Stop the watcher first: it holds the digests it has already seen, so
         ;; leaving it running would skip re-observing the page.
         (when-let [stop? (:watcher s)] (reset! stop? true))
-        (swap! session assoc :watcher nil :notebook-id nil)
+        (swap! connection assoc :watcher nil :notebook-id nil)
         (cond
           (not (.exists nb)) {:ok? true :archived nil :message "no history to archive"}
           (.renameTo nb dest) {:ok? true :archived (.getAbsolutePath dest)}
           :else {:ok? false :message (str "could not rename " nb)}))
       {:ok? false :message "no notebook linked"})
-    {:ok? false :message "no session"}))
+    {:ok? false :message "not connected"}))
 
 (defn set-render-opts!
   "Change how handwriting is drawn -- colours, resolution -- and redraw what
@@ -323,17 +337,17 @@
    their retained snapshots, so the history does not end up half in one scheme
    and half in another. Options not given keep their current values."
   [opts]
-  (if-let [s @session]
+  (if-let [s @connection]
     (let [merged (merge (:render-opts s) opts)]
-      (swap! session assoc :render-opts merged)
+      (swap! connection assoc :render-opts merged)
       ;; The running watcher captured the old options; restart it.
       (when-let [id (:notebook-id s)]
         (when-let [stop? (:watcher s)] (reset! stop? true))
-        (swap! session assoc :watcher nil :notebook-id nil))
+        (swap! connection assoc :watcher nil :notebook-id nil))
       (let [redrawn (when-let [id (:notebook-id s)]
                       (ink/rerender! (store/notebook-dir (:state-root s) id) nil merged))]
         {:ok? true :render-opts merged :rerendered (count (:rendered redrawn))}))
-    {:ok? false :message "no session"}))
+    {:ok? false :message "not connected"}))
 
 (defn history-version
   "A monotonic marker that changes whenever history grows.
@@ -341,7 +355,7 @@
    Cheap enough to poll: it reads the event directory listing, not the events.
    The Emacs buffer uses it to avoid refetching history that has not changed."
   []
-  (if-let [s @session]
+  (if-let [s @connection]
     (if-let [id (:notebook-id s)]
       {:ok? true :version (store/next-sequence (store/notebook-dir (:state-root s) id))}
       {:ok? true :version 0})
@@ -417,5 +431,5 @@
   []
   (with-notebook
     (fn [nb]
-      (let [r (ink/regroup! nb nil (:render-opts @session))]
+      (let [r (ink/regroup! nb nil (:render-opts @connection))]
         (assoc r :ok? true :merged (reduce + (map (comp count :entries) (:joined r))))))))

@@ -197,6 +197,19 @@
         hit (most-recent-overlapping bb (map :events groups))]
     (when hit (first (filter #(= hit (:events %)) groups)))))
 
+(defn- redraw!
+  "Draw each of `groups` from its retained snapshots, to its current asset."
+  [nb groups opts]
+  (reduce
+   (fn [acc {:keys [entry-id events asset]}]
+     (let [strokes (mapcat #(event-strokes nb %) events)]
+       (if (empty? strokes)
+         (update acc :skipped conj entry-id)
+         (do (render-strokes! strokes (io/file nb (:path asset)) opts)
+             (update acc :rendered conj entry-id)))))
+   {:rendered [] :skipped []}
+   groups))
+
 (defn rerender!
   "Redraw every handwriting asset for `page-id` (or all pages) with `opts`.
 
@@ -207,15 +220,18 @@
    current asset is redrawn."
   ([nb] (rerender! nb nil nil))
   ([nb page-id opts]
-   (reduce
-    (fn [acc {:keys [entry-id events asset]}]
-      (let [strokes (mapcat #(event-strokes nb %) events)]
-        (if (empty? strokes)
-          (update acc :skipped conj entry-id)
-          (do (render-strokes! strokes (io/file nb (:path asset)) opts)
-              (update acc :rendered conj entry-id)))))
-    {:rendered [] :skipped []}
-    (entry-groups (ink-events nb page-id)))))
+   (redraw! nb (entry-groups (ink-events nb page-id)) opts)))
+
+(defn restore!
+  "Draw every entry whose current image is missing, as when the handwriting
+   cache was cleared or the session was recorded on another computer. The
+   images are derived, so their absence loses nothing; this puts them back.
+   Entries whose image exists are left alone."
+  [nb opts]
+  (redraw! nb
+           (remove #(.exists (io/file nb (get-in % [:asset :path])))
+                   (entry-groups (ink-events nb nil)))
+           opts))
 
 (defn- replay
   "Replay observations in order under the merging rule, ignoring how they were

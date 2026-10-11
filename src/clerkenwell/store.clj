@@ -1,15 +1,20 @@
 (ns clerkenwell.store
   "Manifest, event log, assets and recovery.
 
-   Layout, per clerkenwell.md:
+   Layout, per clerkenwell.md and docs/sessions.md:
 
      <state-root>/<notebook-uuid>/
-       manifest.edn
-       events/<sequence>.edn
-       results/<result-uuid>/record.edn
-       results/<result-uuid>/result.png
-       pages/<page-uuid>/<snapshot-id>.rm
-       handwriting/<entry-uuid>.png
+       events/<sequence>.edn               canonical
+       results/<result-uuid>/record.edn    canonical
+       results/<result-uuid>/result.png    canonical
+       pages/<page-uuid>/<snapshot-id>.rm  canonical
+       manifest.edn                        derived: replayed from events
+       handwriting/<entry-uuid>.png        derived: drawn from the snapshots
+
+   Canonical parts are the session itself. Derived parts are this computer's
+   cache of them, and can be deleted at any time: the manifest is replayed on
+   read, and handwriting is redrawn, in this computer's colours, by
+   `clerkenwell.ink/restore!`.
 
    Two invariants do the real work:
 
@@ -77,6 +82,14 @@
     (apply str (map #(format "%02x" (bit-and % 0xff)) (.digest md)))))
 
 ;; -------- paths --------
+
+(defn default-root
+  "Where sessions are kept unless told otherwise: a cache outside any project,
+   since a session belongs to a document on the tablet, not to the code."
+  []
+  (io/file (or (System/getenv "XDG_CACHE_HOME")
+               (io/file (System/getProperty "user.home") ".cache"))
+           "clerkenwell"))
 
 (defn notebook-dir [state-root notebook-id]
   (io/file state-root (str notebook-id)))

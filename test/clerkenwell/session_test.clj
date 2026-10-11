@@ -33,7 +33,7 @@
                       (session/stop!)))
 
 (deftest start-is-idempotent
-  (testing "re-opening the buffer against a live session is not an error"
+  (testing "re-opening the buffer against a live connection is not an error"
     (let [root (str (tmp-root))
           a (session/start! {:state-root root :ssh-host "no-host" :port port})
           b (session/start! {:state-root root :ssh-host "no-host" :port port})]
@@ -42,12 +42,14 @@
       (is (:ok? b))
       (is (true? (:already-running? b)))
       (testing "and the second call did not replace the running server"
-        (is (= (:port a) (:port b)))))))
+        (is (= (:port a) (:port b))))
+      (testing "the state root is reported absolute, as Emacs resolves it elsewhere"
+        (is (= (.getAbsolutePath (java.io.File. root)) (:state-root a)))))))
 
-(deftest submit-requires-a-session
+(deftest submit-requires-a-connection
   (let [r (session/submit "(+ 1 2)" "user")]
     (is (false? (:ok? r)))
-    (is (= :session (:stage r)))))
+    (is (= :connection (:stage r)))))
 
 (deftest submit-refuses-a-stale-identity
   (testing "aiming at a guessed page is worse than not submitting"
@@ -118,7 +120,7 @@
         (Thread/sleep 300)
         (let [blocked (session/submit "(+ 1 2)" "user")]
           (is (false? (:ok? blocked)))
-          (is (= :session (:stage blocked))))
+          (is (= :connection (:stage blocked))))
         (deliver @(resolve 'user/ckw-gate) :done)
         @other))))
 

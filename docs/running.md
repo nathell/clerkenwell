@@ -172,7 +172,7 @@ project. It evaluates in its own JVM, so it cannot see your namespaces; prefer
 
 
 ```sh
-clojure -M -m clerkenwell.main --ssh-host rm --state-root state
+clojure -M -m clerkenwell.main --ssh-host rm
 ```
 
 It starts the handshake server, then waits for the adapter to report which
@@ -198,6 +198,13 @@ The result should appear on the page within about a second of `transferred`.
 History is persistent, kept per notebook UUID under the state root, and is
 never cleared automatically -- it is meant to be a durable record, so a command
 that silently discarded it would defeat the purpose.
+
+The state root is `$XDG_CACHE_HOME/clerkenwell`, or `~/.cache/clerkenwell`,
+unless `clerkenwell-state-root` (or the driver's `--state-root`) says
+otherwise. It is deliberately outside your project: a notebook's history
+belongs to the document on the tablet, not to the code (see
+`docs/sessions.md`). Within it, `handwriting/` and `manifest.edn` are derived
+and can be deleted; they are rebuilt when the notebook is next opened.
 
 Two separate things decide what you see:
 
@@ -254,7 +261,7 @@ never retried automatically. Look at the page, then from a REPL:
 
 ```clojure
 (require '[clerkenwell.transport :as transport] '[clerkenwell.store :as store])
-(def nb (store/notebook-dir "state" "<notebook-uuid>"))
+(def nb (store/notebook-dir (store/default-root) "<notebook-uuid>"))
 (transport/reconcile! nb "<result-id>" true)   ; it is there
 (transport/reconcile! nb "<result-id>" false)  ; it is not; deliver again
 (transport/abandon! nb "<result-id>")          ; give up on it

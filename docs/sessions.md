@@ -1,6 +1,6 @@
 # Sessions on the device
 
-Status: design, not yet implemented.
+Status: design; step 1 of the plan is implemented.
 
 Today a notebook's history lives on the computer, under
 `clerkenwell-state-root`, relative to the REPL's working directory: it sits next

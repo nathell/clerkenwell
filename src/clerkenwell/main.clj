@@ -71,7 +71,7 @@
 
 (defn -main [& args]
   (let [{:keys [state-root ssh-host notebook page port] :as opts}
-        (merge {:state-root "state" :port "14242"} (parse-args args))]
+        (merge {:state-root (str (store/default-root)) :port "14242"} (parse-args args))]
     (when-not ssh-host
       (println "usage: clojure -M -m clerkenwell.main --ssh-host <alias> [--state-root DIR]")
       (println "                  [--notebook UUID] [--page UUID] [--port N]")
