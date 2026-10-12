@@ -65,7 +65,7 @@
       (.start))
     stop?))
 
-(declare ensure-watching!)
+(declare ensure-watching! active)
 
 (defn- start-identity-poller!
   "Watch for the device reporting a notebook, and attach the handwriting watcher
@@ -79,8 +79,8 @@
          (fn []
            (while (not @stop?)
              (try
-               (when-let [live (transport/fresh-identity)]
-                 (ensure-watching! (:doc live)))
+               (when-let [live (active)]
+                 (ensure-watching! live))
                (catch Exception _ nil))
              (Thread/sleep 1000))))
     (.setDaemon true)
@@ -110,20 +110,128 @@
   [s]
   (or (:device s) {:ssh-host (:ssh-host s)}))
 
+;; -------- the attached notebook, and its lease --------
+;;
+;; An attachment is the notebook the tablet has open, as this connection sees
+;; it: its device copy, and whether this connection holds its lease. Holding
+;; it, the connection watches for handwriting, records results and copies its
+;; history to the device.
+;;
+;; Which connection holds it is decided by the tunnel, which only one computer
+;; can have: the tablet reports what it has open only to that one, and a
+;; report for a notebook this connection does not hold makes it take the
+;; lease, without asking. The lease is a fencing token: a connection that has
+;; lost its tunnel without noticing -- a laptop that went to sleep, say -- has
+;; its pushes refused on the device, and stops writing.
+
+(defn- held? [att] (boolean (some-> att :state deref :held?)))
+
+(defn- gain!
+  "Start writing `att`: fetch everything first, since the log must continue
+   the device's, then -- when the lease was not already this connection's --
+   mark insertions another left unacknowledged as uncertain, then watch."
+  [s att recover?]
+  (locking (:lock att)
+    (when-not (held? att)
+      (let [{:keys [nb mirror notebook-id state]} att]
+        (mirror/pull! mirror)
+        (ink/restore! nb (:render-opts s))
+        (when recover?
+          (doseq [id (store/recover! nb)]
+            (println (format "!! %s was interrupted mid-insertion -> :uncertain" id))
+            (println "   It may or may not be on the page. Inspect, then reconcile.")))
+        (swap! state assoc :held? true
+               :watcher (start-watcher! s notebook-id))))))
+
+(defn- lose!
+  "Stop writing `att`, which another connection has taken."
+  [att]
+  (locking (:lock att)
+    (when-let [w (:watcher @(:state att))] (reset! w true))
+    (swap! (:state att) assoc :held? false :watcher nil
+           :lost-at (System/currentTimeMillis))
+    (println "clerkenwell: another computer has taken this notebook over; nothing more is written from here")))
+
+(defn- take!
+  "Make `att`'s lease this connection's, from whoever holds it, and start
+   writing. Already holding it, nothing changes. Returns whether it is held;
+   throws when the device cannot be asked."
+  [s att]
+  (let [m (:mirror att)
+        current (:token (mirror/read-lease m))
+        mine? (= (:lease-token s) current)]
+    (cond
+      (and mine? (held? att)) true
+      ;; Taken while this connection was not looking: whatever it wrote
+      ;; since is set aside by the pull, where it differs.
+      (held? att) (do (lose! att) (take! s att))
+      (:ok? (mirror/write-lease! m (if mine? (:lease-token s) (or current :none))))
+      (do (gain! s att (not mine?)) true)
+      :else false)))
+
+(defn- try-take!
+  "`take!`, recording a failure, so it is not retried for a few seconds."
+  [s att]
+  (or (try (take! s att) (catch Exception _ false))
+      (do (swap! (:state att) assoc :retry-at (+ (System/currentTimeMillis) 5000))
+          false)))
+
+(defn- start-copier!
+  "Send what is new in `att` to the device every two seconds, while this
+   connection holds its lease."
+  [att]
+  (doto (Thread.
+         (fn []
+           (while (not @(:stop att))
+             (try
+               (when (and (held? att) (:lease-lost? (mirror/flush! (:mirror att))))
+                 (lose! att))
+               (catch Exception _ nil))
+             (Thread/sleep 2000))))
+    (.setDaemon true)
+    (.setName (str "clerkenwell-copy-" (:notebook-id att)))
+    (.start)))
+
+(defn- release!
+  "Let go of `att`: stop copying and watching, send what the device does not
+   have yet and give the lease up."
+  [att]
+  (reset! (:stop att) true)
+  (locking (:lock att)
+    (when-let [w (:watcher @(:state att))] (reset! w true))
+    (when (held? att)
+      (mirror/flush! (:mirror att))
+      (mirror/release-lease! (:mirror att)))
+    (swap! (:state att) assoc :held? false :watcher nil))
+  (mirror/close! (:mirror att)))
+
 (defn- record-on-device!
   "Bring the device's copy of the session in `nb` up to date, now: called as
-   an insertion is about to be authorized."
+   an insertion is about to be authorized. Refused on the device unless this
+   connection holds the lease."
   [nb]
   (let [s @connection
-        m (:mirror s)
+        m (some-> s :attachment :mirror)
         m (if (and m (= (.getCanonicalFile (io/file nb)) (.getCanonicalFile (:nb m))))
             m
-            (mirror/mirror nb (.getName (io/file nb)) (device s)))]
+            (mirror/mirror nb (.getName (io/file nb)) (device s) (:lease-token s)))]
     (mirror/flush! m)))
+
+(defn- writable?
+  "Whether this connection may write the notebook `doc`: it is attached and
+   holds its lease."
+  [doc]
+  (let [att (:attachment @connection)]
+    (and (= doc (:notebook-id att)) (held? att))))
+
+(defn- lease-token []
+  (let [bs (byte-array 16)]
+    (.nextBytes (java.security.SecureRandom.) bs)
+    (apply str (map #(format "%02x" (bit-and % 0xff)) bs))))
 
 (defn start!
   "Start the transport server and, once the device reports which notebook is
-   open, the handwriting watcher.
+   open, attach to it.
 
    `:ssh-host` is a normal SSH host alias. `:on-ink` is called with each new
    handwriting observation, which is how the Emacs buffer learns about it."
@@ -137,42 +245,43 @@
           state-root (.getAbsolutePath (io/file (or (:state-root opts)
                                                     (store/default-root))))
           server (transport/start! state-root {:port port
+                                               ;; Done on attach, holding the lease.
+                                               :recover? false
+                                               :writable? #(writable? %)
                                                :on-attempt #(record-on-device! %)})
           stop? (atom false)]
       (reset! connection (assoc opts :state-root state-root
                                 ;; Identifies this connection, so a thread
                                 ;; of an earlier one cannot write into it.
                                 :token (Object.)
-                                :server server :watcher nil :notebook-id nil
+                                ;; Names it in the leases it holds.
+                                :lease-token (lease-token)
+                                :server server :attachment nil :notebook-id nil
                                 :identity-stop stop?))
       (start-identity-poller! stop?)
       {:ok? true :already-running? false :port port :state-root state-root})))
 
+(defn- detach!
+  "Let go of the notebook connection `s` is attached to. Its history is
+   untouched. A connection that is no longer the current one is left as it
+   is."
+  [s]
+  (when-let [att (:attachment s)] (release! att))
+  (swap! connection #(if (and % (identical? (:token %) (:token s)))
+                       (assoc % :attachment nil :notebook-id nil)
+                       %)))
+
 (defn stop!
-  "Stop the server and watcher. History and pending deliveries are untouched."
+  "Stop the server and let go of the notebook: what the device does not have
+   yet is sent, and the lease given up, so another computer can continue from
+   here. History and pending deliveries are untouched."
   []
   (when-let [s @connection]
     (when-let [stop? (:identity-stop s)] (reset! stop? true))
-    (when-let [stop? (:watcher s)] (reset! stop? true))
-    (when-let [stop? (:mirror-stop s)] (reset! stop? true))
-    ;; What has not reached the device yet goes now, so another computer
-    ;; can continue from here.
-    (when-let [m (:mirror s)] (mirror/flush! m))
+    (detach! s)
     (transport/stop! (:server s))
     (reset! connection nil)
     {:ok? true}))
-
-(defn- detach!
-  "Stop watching and copying the notebook connection `s` is attached to. Its
-   history is untouched. A connection that is no longer the current one is
-   left as it is."
-  [s]
-  (when-let [stop? (:watcher s)] (reset! stop? true))
-  (when-let [stop? (:mirror-stop s)] (reset! stop? true))
-  (when-let [m (:mirror s)] (mirror/close! m))
-  (swap! connection #(if (and % (identical? (:token %) (:token s)))
-                       (assoc % :watcher nil :mirror nil :mirror-stop nil :notebook-id nil)
-                       %)))
 
 (def ^:private attach-lock
   "Serialises attaching to a notebook with setting its history aside, so the
@@ -181,38 +290,66 @@
   (Object.))
 
 (defn- ensure-watching!
-  "Attach to a notebook when the device reports it: fetch what the device's
-   copy has that this computer does not, then watch it and keep the copy up
-   to date.
+  "Attach to the notebook the tablet reports, in `live`, and take its lease:
+   the tablet reporting to this connection means this is the computer in use.
+   Taking it fetches what the device's copy has that this computer does not,
+   and the two are kept in step from then on.
+
+   A notebook already attached is taken again when it was lost, on a report
+   that came after losing it, and checked again when reports resume after a
+   gap -- the tunnel was down, and another computer may have had it meanwhile.
 
    Handwriting images are derived, so any that are missing -- the cache was
    cleared, or the history was recorded elsewhere -- are redrawn first, before
    the notebook becomes the one history is read from."
-  [notebook-id]
+  [{notebook-id :doc at :at}]
   (locking attach-lock
     (let [s @connection]
-      (when (and s (not= notebook-id (:notebook-id s)))
-        (detach! s)
-        (let [nb (store/notebook-dir (:state-root s) notebook-id)
-              m (mirror/mirror nb notebook-id (device s))]
-          ;; A failed pull is reported in the status; the local history is
-          ;; still there to work with.
-          (mirror/pull! m)
-          (ink/restore! nb (:render-opts s))
-          ;; The connection may have been stopped, and another started,
-          ;; while this one was fetching. Attach only to the one asked.
-          (let [watcher (start-watcher! s notebook-id)
-                mirror-stop (mirror/start! m)
-                same? #(identical? (:token %) (:token s))
-                after (swap! connection #(if (same? %)
-                                           (assoc % :watcher watcher :mirror m
-                                                  :mirror-stop mirror-stop
-                                                  :notebook-id notebook-id)
-                                           %))]
-            (when-not (same? after)
-              (reset! watcher true)
-              (reset! mirror-stop true)
-              (mirror/close! m))))))))
+      (when s
+        (if (= notebook-id (:notebook-id s))
+          (let [att (:attachment s)
+                {:keys [held? lost-at retry-at seen-at]} @(:state att)
+                gap? (> (- at (or seen-at 0)) (:identity-max-age-ms s))]
+            (swap! (:state att) assoc :seen-at at)
+            (when (and (or (not held?) gap?)
+                       (> at (or lost-at 0))
+                       (> (System/currentTimeMillis) (or retry-at 0)))
+              (try-take! s att)))
+          (do
+            (detach! s)
+            (let [nb (store/notebook-dir (:state-root s) notebook-id)
+                  att {:notebook-id notebook-id
+                       :nb nb
+                       :mirror (mirror/mirror nb notebook-id (device s) (:lease-token s))
+                       :stop (atom false)
+                       :lock (Object.)
+                       :state (atom {:held? false :seen-at at})}]
+              ;; An unreachable device leaves the notebook unwritable here, and
+              ;; the next report tries again; without SSH nothing could be
+              ;; written to the page anyway.
+              (try-take! s att)
+              (start-copier! att)
+              ;; The connection may have been stopped, and another started,
+              ;; while this one was fetching. Attach only to the one asked.
+              (let [same? #(identical? (:token %) (:token s))
+                    after (swap! connection #(if (same? %)
+                                               (assoc % :attachment att :notebook-id notebook-id)
+                                               %))]
+                (when-not (same? after)
+                  (release! att))))))))))
+
+(defn lease
+  "Whether this connection holds the attached notebook's lease: {:held?}."
+  []
+  (when-let [att (:attachment @connection)]
+    {:held? (held? att)}))
+
+(defn- unwritable-message
+  "Why the attached notebook cannot be written here, in words."
+  []
+  (if (:lost-at (some-> @connection :attachment :state deref))
+    "another computer has taken this notebook over; it is taken back when the tablet reports here again"
+    "this notebook's lease could not be taken on the tablet; is ssh to it working?"))
 
 ;; -------- what the device says is open --------
 
@@ -245,7 +382,7 @@
                            (str "device reports page " (:page reported))
                            "no recent report from the adapter; check the tunnel and xovi")}
        :ssh (assoc ssh :host (:ssh-host s))
-       :copy (if-let [m (:mirror s)]
+       :copy (if-let [m (some-> s :attachment :mirror)]
                (mirror/status m)
                {:ok? true :pending nil :message "no notebook attached"})})
     {:running? false}))
@@ -265,7 +402,9 @@
        :active live
        :evaluating? @evaluating
        ;; The device's copy of the session: {:ok? :pending :message}.
-       :copy (some-> (:mirror s) mirror/status)
+       :copy (some-> s :attachment :mirror mirror/status)
+       ;; Whether this connection may write the notebook: {:held?}.
+       :lease (lease)
        :deliveries (frequencies (keep #(get-in % [:delivery :state]) (vals m)))
        :uncertain (vec (for [[id r] m
                              :when (= :uncertain (get-in r [:delivery :state]))]
@@ -310,9 +449,14 @@
              {:ok? false :stage :namespace
               :message (str "namespace not loaded in this REPL: " ns-name)}
 
+             (do (ensure-watching! live)
+                 (not (writable? (:doc live))))
+             ;; Checked before evaluating: nothing has happened yet, so
+             ;; submitting again is safe.
+             {:ok? false :stage :lease :message (unwritable-message)}
+
              :else
              (let [{:keys [doc page]} live
-                   _ (ensure-watching! doc)
                    nb (store/notebook-dir (:state-root s) doc)
                    prev-bottom (->> (vals (store/read-manifest nb))
                                     (filter #(= page (:page-id %)))
@@ -353,20 +497,30 @@
       {:ok? false :message "no notebook linked yet"})
     {:ok? false :message "not connected"}))
 
+(defn- with-held-notebook
+  "As `with-notebook`, for changes to its history, which only the holder of
+   its lease may make."
+  [f]
+  (with-notebook
+    (fn [nb]
+      (if (writable? (.getName (io/file nb)))
+        (f nb)
+        {:ok? false :message (unwritable-message)}))))
+
 (defn retry-delivery
   "Resume a definitely-uninserted result with its existing id and asset."
   [result-id]
-  (with-notebook #(transport/retry-delivery! % result-id)))
+  (with-held-notebook #(transport/retry-delivery! % result-id)))
 
 (defn reconcile
   "Resolve an :uncertain result after looking at the page."
   [result-id present?]
-  (with-notebook #(transport/reconcile! % result-id present?)))
+  (with-held-notebook #(transport/reconcile! % result-id present?)))
 
 (defn abandon
   "Give up on a known-uninserted delivery."
   [result-id]
-  (with-notebook #(transport/abandon! % result-id)))
+  (with-held-notebook #(transport/abandon! % result-id)))
 
 (defn archive-notebook!
   "Set the linked notebook's history aside, so the next observation starts fresh.
@@ -384,16 +538,22 @@
    genuinely blank slate, start on a blank page too."
   []
   (locking attach-lock
-    (if-let [s @connection]
-      (if-let [id (:notebook-id s)]
+    (let [s @connection
+          id (:notebook-id s)]
+      (cond
+        (nil? s) {:ok? false :message "not connected"}
+        (nil? id) {:ok? false :message "no notebook linked"}
+        (not (writable? id))
+        {:ok? false :message (unwritable-message)}
+        :else
         (let [nb (store/notebook-dir (:state-root s) id)
               stamp (.format (java.time.format.DateTimeFormatter/ofPattern
                               "yyyyMMdd-HHmmss")
                              (java.time.LocalDateTime/now))
               dest (io/file (:state-root s) (str id ".archived-" stamp))]
-          ;; Stop the watcher first: it holds the digests it has already seen,
-          ;; so leaving it running would skip re-observing the page. And stop
-          ;; copying, or a flush could recreate what is about to be moved.
+          ;; Let go first: the watcher holds the digests it has already seen,
+          ;; so leaving it running would skip re-observing the page, and a
+          ;; flush could recreate what is about to be moved.
           (detach! s)
           (let [device-copy (mirror/archive! id (device s) stamp)]
             (cond
@@ -402,9 +562,7 @@
                                         (:message device-copy))}
               (not (.exists nb)) {:ok? true :archived nil :message "no history to archive"}
               (.renameTo nb dest) {:ok? true :archived (.getAbsolutePath dest)}
-              :else {:ok? false :message (str "could not rename " nb)})))
-        {:ok? false :message "no notebook linked"})
-      {:ok? false :message "not connected"})))
+              :else {:ok? false :message (str "could not rename " nb)})))))))
 
 (defn set-render-opts!
   "Change how handwriting is drawn -- colours, resolution -- and redraw what
@@ -429,11 +587,15 @@
   "A monotonic marker that changes whenever history grows.
 
    Cheap enough to poll: it reads the event directory listing, not the events.
-   The Emacs buffer uses it to avoid refetching history that has not changed."
+   The Emacs buffer uses it to avoid refetching history that has not changed.
+   :held? says whether this connection may write the notebook, which changes
+   without history changing when the lease is taken or lost."
   []
   (if-let [s @connection]
     (if-let [id (:notebook-id s)]
-      {:ok? true :version (store/next-sequence (store/notebook-dir (:state-root s) id))}
+      {:ok? true
+       :version (store/next-sequence (store/notebook-dir (:state-root s) id))
+       :held? (writable? id)}
       {:ok? true :version 0})
     {:ok? false :version 0}))
 
@@ -505,7 +667,7 @@
   "Retroactively merge handwriting entries that overlap vertically, as live
    observation now does. Safe to repeat: a second run finds nothing to do."
   []
-  (with-notebook
+  (with-held-notebook
     (fn [nb]
       (let [r (ink/regroup! nb nil (:render-opts @connection))]
         (assoc r :ok? true :merged (reduce + (map (comp count :entries) (:joined r))))))))

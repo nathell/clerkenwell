@@ -161,6 +161,9 @@ over a slow connection or in a terminal frame."
 (defvar-local clerkenwell--history-version nil
   "Last history version seen, so unchanged history is not refetched.")
 
+(defvar-local clerkenwell--held 'unknown
+  "Whether this REPL held the notebook's lease at the last poll.")
+
 (defvar-local clerkenwell--entries nil
   "The history entries last rendered, so a resize can redraw without refetching.")
 
@@ -594,8 +597,11 @@ line looks healthy."
                      (page (and active (clerkenwell--name
                                         (clerkenwell--get active :page))))
                      (uncertain (clerkenwell--get s :uncertain))
-                     (copy (clerkenwell--get s :copy)))
-                (concat (if (and page (not (string-empty-p page)))
+                     (copy (clerkenwell--get s :copy))
+                     (lease (clerkenwell--get s :lease)))
+                (concat (when (and lease (not (clerkenwell--get lease :held?)))
+                          "read-only ")
+                        (if (and page (not (string-empty-p page)))
                             (format "page %s" (substring page 0 (min 8 (length page))))
                           "no page")
                         (when (and uncertain (> (length uncertain) 0))
@@ -647,6 +653,10 @@ customised that variable the other way)."
           ((null result)
            (setq clerkenwell--status "error")
            (message "Clerkenwell: no result (is clerkenwell.session on the classpath?)"))
+          ((equal "lease" (clerkenwell--name (clerkenwell--get result :stage)))
+           ;; Nothing was evaluated, so submitting again is safe.
+           (setq clerkenwell--status "read-only")
+           (message "Clerkenwell: %s" (clerkenwell--get result :message)))
           ((clerkenwell--get result :ok?)
            ;; Only clear the draft if it is still the text we submitted.
            (when (= revision clerkenwell--draft-revision)
@@ -772,10 +782,18 @@ cannot interleave with a submission."
              (not clerkenwell--in-flight))
     (condition-case nil
         (let* ((v (clerkenwell--eval-sync "(clerkenwell.session/history-version)"))
-               (version (and v (clerkenwell--get v :version))))
-          (when (and version (not (equal version clerkenwell--history-version)))
-            (setq clerkenwell--history-version version)
-            (clerkenwell-refresh)))
+               (version (and v (clerkenwell--get v :version)))
+               (held (and v (clerkenwell--get v :held?) t)))
+          (cond
+           ((and version (not (equal version clerkenwell--history-version)))
+            (setq clerkenwell--history-version version
+                  clerkenwell--held held)
+            (clerkenwell-refresh))
+           ;; Taking or losing the notebook changes no history, but the
+           ;; mode line says which it is.
+           ((and v (not (eq held clerkenwell--held)))
+            (setq clerkenwell--held held)
+            (clerkenwell--update-status))))
       ;; A dead REPL or a stopped session must not spam errors from a timer.
       (error nil))))
 

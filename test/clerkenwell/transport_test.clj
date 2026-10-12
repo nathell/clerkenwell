@@ -199,3 +199,17 @@
           (let [[_ body] (http-get (+ port 5) (str "/command?doc=" doc "&page=" page))]
             (is (= "{}" body)))))
       (finally (transport/stop! server)))))
+
+(deftest a-notebook-held-elsewhere-is-not-served
+  (let [root (tmp-root)
+        doc "nb-7" page "page-7"
+        [nb id] (submitted root doc page)
+        server (transport/start! root {:port (+ port 6) :writable? (constantly false)})]
+    (try
+      (let [[_ body] (http-get (+ port 6) (str "/command?doc=" doc "&page=" page))]
+        (is (= "{}" body) "its results are the holder's to deliver"))
+      (let [[status _] (http-get (+ port 6) (str "/attempt?id=" id "&doc=" doc
+                                                 "&page=" page "&instance=i1"))]
+        (is (= 409 status))
+        (is (= :transferred (state nb id)) "and nothing was written"))
+      (finally (transport/stop! server)))))

@@ -213,8 +213,17 @@ new history is copied to it every couple of seconds, and in full on
 `clerkenwell-disconnect`. A result is only inserted once its attempt has
 reached the tablet's copy, so another computer can never insert it a second
 time. `C-c C-d` reports how the copy stands, and the mode line says
-`⚠not copied to tablet` when it is failing. Only one computer should be
-connected at a time, for now.
+`⚠not copied to tablet` when it is failing.
+
+Only one connection writes a notebook at a time: the one holding its lease,
+which is kept on the tablet. The tablet reports what it has open only through
+the tunnel, which one computer can have at a time, and the connection it
+reports to takes the lease, without asking. So switching computers is just
+opening the tunnel from the other one: it fetches what it lacks and
+continues. A computer that lost the tunnel without noticing -- it went to
+sleep, say -- has its copies refused by the tablet from then on, and the mode
+line there says `read-only`; anything it recorded meanwhile that differs
+from the tablet's is set aside under `stranded/`, never merged.
 
 `clerkenwell-reset-history` sets the tablet's copy aside as well, and refuses
 if it cannot reach the tablet: otherwise the next attach would fetch the

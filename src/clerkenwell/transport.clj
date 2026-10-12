@@ -149,11 +149,17 @@
      (when (< (- (System/currentTimeMillis) at) max-age-ms)
        seen))))
 
-(defn- handle-command [state-root {:keys [doc page instance]}]
+(defn- handle-command
+  "Note what the adapter has open, and offer it the result waiting for that
+   page. Nothing is offered for a notebook this host may not write, per the
+   configured `:writable?`: another connection holds it, and its results are
+   that connection's to deliver."
+  [state-root {:keys [writable?]} {:keys [doc page instance]}]
   (reset! active-page {:doc doc :page page :instance instance
                        :at (System/currentTimeMillis)})
-  (if-let [[id r] (pending-for (store/read-manifest
-                               (store/notebook-dir state-root doc)) doc page)]
+  (if-let [[id r] (when (or (nil? writable?) (writable? doc))
+                    (pending-for (store/read-manifest
+                                  (store/notebook-dir state-root doc)) doc page))]
     (let [{:keys [width height]} (:asset r)
           {:keys [dx dy]} (:placement r)
           [sx sy] (placement/display->scene dx dy width height nil)]
@@ -184,12 +190,13 @@
    the local log, and must return {:ok? true} for the call to be authorized:
    it is how the attempt reaches the device's copy of the session first, so
    that whatever may be on the page is always in the log there."
-  [state-root {:keys [on-attempt]} {:keys [id doc page instance]}]
+  [state-root {:keys [on-attempt writable?]} {:keys [id doc page instance]}]
   (let [nb (notebook-holding state-root id)
         r (when nb (get (store/read-manifest nb) id))
         state (get-in r [:delivery :state])]
     (cond
       (nil? r) [409 "unknown id"]
+      (and writable? (not (writable? doc))) [409 "notebook held elsewhere"]
       (not= :transferred state) [409 (str "state=" state)]
       (or (not= doc (:notebook-id r)) (not= page (:page-id r))) [409 "target mismatch"]
       :else
@@ -234,7 +241,7 @@
             p (params (.getQuery (.getRequestURI ex)))
             [status body] (try
                             (case uri
-                              "/command" (handle-command state-root p)
+                              "/command" (handle-command state-root config p)
                               "/attempt" (handle-attempt state-root config p)
                               "/ack"     (handle-ack state-root p)
                               [404 "no"])
@@ -246,13 +253,15 @@
 
 (defn start!
   "Start the handshake server bound to loopback, after recovering every notebook
-   under `state-root`. The notebook is resolved per request from the identity
-   the adapter reports, so switching notebooks needs no restart. Returns a
-   handle for `stop!`."
+   under `state-root` -- unless `:recover?` is false, for a caller that
+   recovers a notebook itself when it may write it. The notebook is resolved
+   per request from the identity the adapter reports, so switching notebooks
+   needs no restart. Returns a handle for `stop!`."
   [state-root config]
-  (let [{:keys [port]} (merge default-config config)
+  (let [{:keys [port recover?]} (merge default-config config)
         root (io/file state-root)]
-    (doseq [d (filter #(.isDirectory %) (or (.listFiles root) []))
+    (doseq [d (when-not (false? recover?)
+                (filter #(.isDirectory %) (or (.listFiles root) [])))
             id (store/recover! d)]
       (println (format "!! %s was interrupted mid-insertion -> :uncertain" id))
       (println "   It may or may not be on the page. Inspect, then reconcile."))

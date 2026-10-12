@@ -1,6 +1,6 @@
 # Sessions on the device
 
-Status: design; steps 1 and 2 of the plan are implemented.
+Status: design; steps 1 to 3 of the plan are implemented.
 
 Today a notebook's history lives on the computer, under
 `clerkenwell-state-root`, relative to the REPL's working directory: it sits next
@@ -22,8 +22,8 @@ rather than to a project.
 
 ## Non-goals, for now
 
-- Two computers writing to one session at the same time. One writes, and
-  taking over is explicit.
+- Two computers writing to one session at the same time. One writes: the
+  one the tablet is reporting to.
 - Migrating existing histories onto the device (see *Later*).
 - Syncing through anything but the tablet: no cloud, no service on the network.
 
@@ -126,35 +126,49 @@ this connection's own unflushed outbox.
 ## The lease
 
 Sequence numbers stay linear only if one connection appends. The holder is
-named in `lease.edn`:
+named in `lease.edn`, whose first line repeats the token as a comment so the
+device's shell can read it:
 
 ```clojure
+;; 9f2c...
 {:token "9f2c..."            ; random per connection
- :holder "laptop / nREPL 52114"
+ :host "laptop" :pid 52114
  :acquired-at "..."}
 ```
 
-- The holder renews it every 30 seconds by rewriting it. Freshness is judged
-  by the file's modification time against the **device's** clock, so the
-  computers' clocks never have to agree.
-- Every push checks the token on the device before publishing, in the same
-  script: a connection that has lost the lease cannot write, even if it has
-  not noticed yet.
-- A connection that finds a lease held by another, fresh or stale, is
-  read-only: the buffer shows the history, the status line says
-  `held by laptop, last seen 10:42`, and submitting asks whether to take
-  over. Taking over writes a new token, then syncs fully before the first
-  write.
-- A connection that loses the lease keeps its unflushed outbox aside rather
-  than discarding it, and says so. By the rule above nothing in it was ever
-  inserted.
+Who holds it is decided by the reverse tunnel. The adapter reports what the
+tablet has open only through it, and only one computer can bind its port, so
+only one connection hears the tablet at a time; two live connections never
+contend. The lease does not arbitrate between them, then. It is a fencing
+token against the connection that lost its tunnel without noticing -- a
+laptop that went to sleep and woke up with its copier still running, which
+would otherwise push events under numbers another computer has since used.
+
+- A report for a notebook this connection does not hold makes it take the
+  lease, without asking: it syncs fully, writes its token, and marks any
+  insertion the previous holder left unacknowledged as uncertain. Reports
+  resuming after a gap check the lease again, since another computer may
+  have had the tunnel meanwhile.
+- Every change to the lease is a compare-and-set under a lock on the device
+  (a directory, which `mkdir` either creates or does not).
+- Every push checks the token on the device, under the same lock, before
+  moving anything into place: a connection that has lost the lease cannot
+  write, even if it has not noticed yet. It notices then, stops watching and
+  copying, and the mode line says `read-only` until the tablet reports to it
+  again.
+- Nothing judges a lease's age, so it is never renewed. Disconnecting sends
+  what the device lacks and removes the lease, which only tidies up.
+
+A computer that lost the lease before its last events reached the device may
+hold events under numbers another holder has since used. Each computer
+records how far its events are known to match the device's (`copied.edn`,
+local); above that, an event the device also has is compared before it is
+trusted. Where they differ, the device's are kept, and this computer's, from
+the first that differs, are moved to `stranded/<stamp>/` and reported. By the
+delivery rule none of them was ever inserted.
 
 The lease is held per connection, not per computer: two REPLs on one machine
-are two holders.
-
-The reverse tunnel can be bound by only one computer at a time, which is
-nearly a lock already; but a stale dropbear process can hold the port long
-after its owner is gone, so the tunnel is a hint, not the mechanism.
+are two holders, though they cannot both serve the tablet's port either.
 
 ## Code and namespaces
 
@@ -171,8 +185,8 @@ namespace cannot be found in this REPL, submitting says so, and
   decides which buffer is live; the others keep their history, read-only
   until their document is open again.
 - `clerkenwell-open` attaches this REPL; run again, it reuses the connection.
-- A read-only session (lease held elsewhere) is marked in the mode line, and
-  `clerkenwell-take-over` takes the lease.
+- A connection that has lost the lease is marked `read-only` in the mode
+  line, until the tablet reports to it again.
 - `clerkenwell-reset-history` archives the session on the device, renamed,
   never deleted, as it does locally now.
 
@@ -183,8 +197,7 @@ namespace cannot be found in this REPL, submitting says so, and
    change otherwise.
 2. **Device copy, one computer.** The outbox and remote publish script; pull
    on attach; synchronous `:insertion-started`.
-3. **The lease.** Acquire, renew, check-on-push, read-only mode, explicit
-   takeover.
+3. **The lease.** Take on report, check on push, set diverged events aside.
 4. **Session identity.** `session.edn`, the remembered namespace, one buffer
    per session.
 
@@ -192,8 +205,6 @@ namespace cannot be found in this REPL, submitting says so, and
 
 - Migrating existing local histories onto the device: a one-off copy plus a
   check that the sequences are contiguous.
-- Automatic takeover of a lease that has been stale for some minutes, if
-  asking turns out to be tedious.
 - Removing sessions whose notebook has been deleted from the tablet, by moving
   them aside.
 - Copying page snapshots on the device instead of uploading them, verified by
@@ -204,6 +215,8 @@ namespace cannot be found in this REPL, submitting says so, and
 - The device holds the record; computers hold a cache.
 - One session per reMarkable document; a session's attachment to a REPL is
   ephemeral.
-- Takeover asks first, for now.
+- The tunnel decides who writes; the lease only fences out a connection that
+  lost it. (Asking before taking over was tried first, and dropped: the
+  computer the tablet reports to is the one in use.)
 - Binding to code is loose: the session remembers its namespace, nothing more.
 - Existing histories stay where they are until the rest works.

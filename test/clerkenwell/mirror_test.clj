@@ -27,6 +27,15 @@
     (store/publish-bytes! (io/file nb "handwriting/e1.png") (byte-array [7]))
     nb))
 
+(def token "aaaa1111")
+
+(defn- held
+  "A handle for `nb` holding its session's lease."
+  [nb device]
+  (let [m (mirror/mirror nb doc device token)]
+    (is (:ok? (mirror/write-lease! m :none)))
+    m))
+
 (defn- files-under [dir]
   (set (mirror/local-files dir)))
 
@@ -41,7 +50,7 @@
 (deftest a-flush-copies-the-session-and-only-once
   (let [nb (a-session)
         device {:local-root (str (tmp-dir "ckw-dev-"))}
-        m (mirror/mirror nb doc device)
+        m (held nb device)
         on-device (io/file (:local-root device) doc)]
     (is (= {:ok? true :pushed 5} (mirror/flush! m)))
     (is (= (files-under nb) (files-under on-device)))
@@ -63,9 +72,9 @@
 (deftest another-computer-pulls-what-it-lacks
   (let [nb (a-session)
         device {:local-root (str (tmp-dir "ckw-dev-"))}
-        _ (mirror/flush! (mirror/mirror nb doc device))
+        _ (mirror/flush! (held nb device))
         elsewhere (store/notebook-dir (tmp-dir "ckw-m-") doc)
-        m (mirror/mirror elsewhere doc device)]
+        m (mirror/mirror elsewhere doc device "bbbb2222")]
     (is (= {:ok? true :pulled 5} (mirror/pull! m)))
     (is (= (files-under nb) (files-under elsewhere)))
     (is (= (store/read-events nb) (store/read-events elsewhere)))
@@ -76,12 +85,12 @@
 
 (deftest a-session-the-device-has-never-seen-pulls-nothing
   (let [m (mirror/mirror (store/notebook-dir (tmp-dir "ckw-m-") doc) doc
-                         {:local-root (str (tmp-dir "ckw-dev-"))})]
+                         {:local-root (str (tmp-dir "ckw-dev-"))} token)]
     (is (= {:ok? true :pulled 0} (mirror/pull! m)))))
 
 (deftest an-unreachable-device-is-reported-and-retried
   (let [nb (a-session)
-        m (mirror/mirror nb doc {:ssh-host "definitely-no-such-host"})
+        m (mirror/mirror nb doc {:ssh-host "definitely-no-such-host"} token)
         r (mirror/flush! m)]
     (is (false? (:ok? r)))
     (is (re-find #"failed" (:message r)))
@@ -90,15 +99,15 @@
 (deftest a-closed-handle-copies-nothing
   (let [nb (a-session)
         device {:local-root (str (tmp-dir "ckw-dev-"))}
-        m (mirror/mirror nb doc device)]
+        m (held nb device)]
     (mirror/close! m)
     (is (false? (:ok? (mirror/flush! m))))
-    (is (not (.exists (io/file (:local-root device) doc))))))
+    (is (not (.exists (io/file (:local-root device) doc "events"))))))
 
 (deftest archiving-sets-the-copy-aside
   (let [nb (a-session)
         device {:local-root (str (tmp-dir "ckw-dev-"))}]
-    (mirror/flush! (mirror/mirror nb doc device))
+    (mirror/flush! (held nb device))
     (is (:ok? (mirror/archive! doc device "20261011-120000")))
     (is (not (.exists (io/file (:local-root device) doc))))
     (is (.isDirectory (io/file (:local-root device) (str doc ".archived-20261011-120000"))))
@@ -108,3 +117,77 @@
 (deftest odd-arguments-never-reach-a-shell
   (is (false? (:ok? (mirror/archive! "x; rm -rf /" {:local-root "/tmp"} "1"))))
   (is (false? (:ok? (mirror/archive! doc {:local-root "/tmp"} "../x")))))
+
+;; -------- the lease --------
+
+(deftest the-lease-is-taken-renewed-and-released
+  (let [device {:local-root (str (tmp-dir "ckw-dev-"))}
+        nb (a-session)
+        m (mirror/mirror nb doc device token)
+        other (mirror/mirror nb doc device "cccc3333")]
+    (is (nil? (mirror/read-lease m)) "nobody holds a new session")
+    (is (= {:ok? true} (mirror/write-lease! m :none)))
+    (let [l (mirror/read-lease m)]
+      (is (= token (:token l)))
+      (is (string? (:host l)))
+      (is (<= 0 (:age-s l) 2)))
+    (testing "taking it as if free fails once it is held, and says by whom"
+      (is (= {:ok? false :held-by token} (mirror/write-lease! other :none))))
+    (testing "renewing is taking it from oneself"
+      (is (:ok? (mirror/write-lease! m token))))
+    (testing "only the holder can release it"
+      (mirror/release-lease! other)
+      (is (= token (:token (mirror/read-lease m))))
+      (mirror/release-lease! m)
+      (is (nil? (mirror/read-lease m))))))
+
+(deftest a-push-without-the-lease-is-refused-on-the-device
+  (let [device {:local-root (str (tmp-dir "ckw-dev-"))}
+        nb (a-session)
+        holder (held nb device)
+        other (mirror/mirror nb doc device "cccc3333")
+        r (mirror/flush! other)]
+    (is (false? (:ok? r)))
+    (is (:lease-lost? r))
+    (is (not (.exists (io/file (:local-root device) doc "events"))))
+    (testing "and nothing is left unpacked"
+      (is (empty? (filter #(.startsWith (.getName %) ".incoming")
+                          (.listFiles (io/file (:local-root device) doc))))))
+    (testing "until it is taken over, after which the old holder is refused"
+      (is (:ok? (mirror/write-lease! other token)))
+      (is (:ok? (mirror/flush! other)))
+      (store/append-event! nb {:event :delivery :id "r1" :state :transferred})
+      (is (:lease-lost? (mirror/flush! holder))))))
+
+(deftest events-that-diverged-are-set-aside-not-lost
+  (testing "a computer that lost the lease before its last events reached the device"
+    (let [device {:local-root (str (tmp-dir "ckw-dev-"))}
+          here (a-session)
+          a (held here device)
+          _ (mirror/flush! a)
+          ;; Another computer continues the session...
+          there (store/notebook-dir (tmp-dir "ckw-m-") doc)
+          b (mirror/mirror there doc device "bbbb2222")]
+      (mirror/pull! b)
+      (is (:ok? (mirror/write-lease! b token)))
+      (store/append-event! there {:event :delivery :id "r1" :state :transferred})
+      (mirror/flush! b)
+      ;; ...while this one recorded an event of its own, never sent.
+      (store/append-event! here {:event :delivery :id "r1" :state :failed})
+      (let [r (mirror/pull! a)]
+        (is (= 1 (:stranded r)))
+        (testing "the device's version is the one kept"
+          (is (= (store/read-events there) (store/read-events here))))
+        (testing "and this computer's is still on disk"
+          (is (.exists (io/file (:stranded-to r) "events" "3.edn"))))))))
+
+(deftest identical-events-are-not-set-aside
+  (testing "an event sent before its confirmation was recorded matches the device's"
+    (let [device {:local-root (str (tmp-dir "ckw-dev-"))}
+          nb (a-session)
+          m (held nb device)]
+      (mirror/flush! m)
+      (io/delete-file (io/file nb "copied.edn"))
+      (let [r (mirror/pull! (mirror/mirror nb doc device token))]
+        (is (:ok? r))
+        (is (nil? (:stranded r)))))))

@@ -3,6 +3,7 @@
             [clojure.test :refer [deftest is testing use-fixtures]]
             [clerkenwell.ink :as ink]
             [clerkenwell.lines :as lines]
+            [clerkenwell.mirror :as mirror]
             [clerkenwell.session :as session]
             [clerkenwell.store :as store]
             [clerkenwell.transport :as transport])
@@ -20,6 +21,12 @@
   (doto (io/file (System/getProperty "java.io.tmpdir") (str "ckw-s-" (random-uuid)))
     (.mkdirs)))
 
+(defn- start!
+  "Start a connection with a directory standing in for the device, unless the
+   test says otherwise: without a reachable device, nothing can be written."
+  [opts]
+  (session/start! (merge {:device {:local-root (str (tmp-root))}} opts)))
+
 (defn- report-identity!
   "Stand in for the adapter's poll, which is what tells the host what is open."
   []
@@ -29,11 +36,12 @@
 (defn- eventually
   "Whether `pred` holds within a few seconds: the device's copy is kept up to
    date in the background."
-  [pred]
+  ([pred] (eventually pred 5))
+  ([pred seconds]
   (loop [n 0]
     (cond (pred) true
-          (> n 50) false
-          :else (do (Thread/sleep 100) (recur (inc n))))))
+          (> n (* 10 seconds)) false
+          :else (do (Thread/sleep 100) (recur (inc n)))))))
 
 (use-fixtures :each (fn [f]
                       (session/stop!)
@@ -44,8 +52,8 @@
 (deftest start-is-idempotent
   (testing "re-opening the buffer against a live connection is not an error"
     (let [root (str (tmp-root))
-          a (session/start! {:state-root root :ssh-host "no-host" :port port})
-          b (session/start! {:state-root root :ssh-host "no-host" :port port})]
+          a (start! {:state-root root :ssh-host "no-host" :port port})
+          b (start! {:state-root root :ssh-host "no-host" :port port})]
       (is (:ok? a))
       (is (false? (:already-running? a)))
       (is (:ok? b))
@@ -62,7 +70,7 @@
 
 (deftest submit-refuses-a-stale-identity
   (testing "aiming at a guessed page is worse than not submitting"
-    (session/start! {:state-root (str (tmp-root)) :ssh-host "no-host" :port port})
+    (start! {:state-root (str (tmp-root)) :ssh-host "no-host" :port port})
     (reset! transport/active-page
             {:doc doc :page page :at (- (System/currentTimeMillis) 60000)})
     (let [r (session/submit "(+ 1 2)" "user")]
@@ -70,7 +78,7 @@
       (is (= :identity (:stage r))))))
 
 (deftest submit-refuses-an-unloaded-namespace
-  (session/start! {:state-root (str (tmp-root)) :ssh-host "no-host" :port port})
+  (start! {:state-root (str (tmp-root)) :ssh-host "no-host" :port port})
   (report-identity!)
   (let [r (session/submit "(+ 1 2)" "no.such.namespace")]
     (is (false? (:ok? r)))
@@ -79,7 +87,7 @@
 (deftest evaluates-in-this-jvm
   (testing "which is the whole point of running inside the user's REPL"
     (let [root (str (tmp-root))]
-      (session/start! {:state-root root :ssh-host "no-host" :port port})
+      (start! {:state-root root :ssh-host "no-host" :port port})
       (report-identity!)
       ;; A var that only exists in THIS process.
       (intern 'user 'ckw-session-marker 4242)
@@ -90,7 +98,7 @@
 (deftest submit-does-not-wait-for-delivery
   (testing "the transfer is SSH and can stall; it must not block the editor"
     (let [root (str (tmp-root))]
-      (session/start! {:state-root root :ssh-host "definitely-no-such-host" :port port})
+      (start! {:state-root root :ssh-host "definitely-no-such-host" :port port})
       (report-identity!)
       (let [started (System/currentTimeMillis)
             r (session/submit "(+ 1 2)" "user")
@@ -108,7 +116,7 @@
   (testing "a transfer failure is recorded on delivery state, never on the result"
     (let [root (str (tmp-root))
           nb (store/notebook-dir root doc)]
-      (session/start! {:state-root root :ssh-host "no-host" :port port})
+      (start! {:state-root root :ssh-host "no-host" :port port})
       (report-identity!)
       (let [r (session/submit "(+ 1 2)" "user")]
         ;; push-asset! refuses outright when the asset is not on the host, which
@@ -122,7 +130,7 @@
 (deftest one-evaluation-at-a-time
   (testing "a second submission while one is in flight is refused"
     (let [root (str (tmp-root))]
-      (session/start! {:state-root root :ssh-host "no-host" :port port})
+      (start! {:state-root root :ssh-host "no-host" :port port})
       (report-identity!)
       (intern 'user 'ckw-gate (promise))
       (let [other (future (session/submit "(deref user/ckw-gate 2000 :timeout)" "user"))]
@@ -136,7 +144,7 @@
 (deftest submit-controls-what-the-page-receives
   (let [root (str (tmp-root))
         nb (store/notebook-dir root doc)]
-    (session/start! {:state-root root :ssh-host "no-host" :port port})
+    (start! {:state-root root :ssh-host "no-host" :port port})
     (report-identity!)
     (testing "by default the page gets the result only"
       (let [r (session/submit "(+ 1 2)" "user")]
@@ -148,7 +156,7 @@
 
 (deftest hidden-values-reach-history-but-not-the-device
   (let [root (str (tmp-root))]
-    (session/start! {:state-root root :ssh-host "no-host" :port port})
+    (start! {:state-root root :ssh-host "no-host" :port port})
     (report-identity!)
     (let [delivered (atom 0)]
       (with-redefs [transport/push-asset! (fn [& _] (swap! delivered inc))]
@@ -163,7 +171,7 @@
 
 (deftest image-results-reach-history-with-their-file
   (let [root (str (tmp-root))]
-    (session/start! {:state-root root :ssh-host "no-host" :port port})
+    (start! {:state-root root :ssh-host "no-host" :port port})
     (report-identity!)
     (with-redefs [transport/push-asset! (fn [& _])]
       (let [r (session/submit "(java.awt.image.BufferedImage. 2000 100 java.awt.image.BufferedImage/TYPE_INT_RGB)" "user")]
@@ -177,7 +185,7 @@
 (deftest strict-height-reaches-placement
   (let [root (str (tmp-root))
         seen (atom [])]
-    (session/start! {:state-root root :ssh-host "no-host" :port port})
+    (start! {:state-root root :ssh-host "no-host" :port port})
     (report-identity!)
     (with-redefs [transport/push-asset! (fn [& _])
                   clerkenwell.core/submit! (let [orig clerkenwell.core/submit!]
@@ -192,7 +200,7 @@
   (let [root (str (tmp-root))
         nb (store/notebook-dir root doc)
         bs (Files/readAllBytes (.toPath (io/file "test/resources/sample-page.rm")))]
-    (session/start! {:state-root root :ssh-host "no-host" :port port})
+    (start! {:state-root root :ssh-host "no-host" :port port})
     (report-identity!)
     ;; Ink observed first, then a computation.
     (ink/observe! nb {:page-id page :rm-bytes bs
@@ -225,7 +233,7 @@
         nb (store/notebook-dir root doc)
         bs (Files/readAllBytes (.toPath (io/file "test/resources/sample-page.rm")))
         line (vec (take 22 (filter lines/ink? (:strokes (lines/parse bs)))))]
-    (session/start! {:state-root root :ssh-host "no-host" :port port})
+    (start! {:state-root root :ssh-host "no-host" :port port})
     (report-identity!)
     (ink/observe! nb {:page-id page :rm-bytes bs :strokes (subvec line 0 11)})
     (session/submit "(+ 1 2)" "user")
@@ -258,7 +266,7 @@
         nb (store/notebook-dir root doc)
         bs (Files/readAllBytes (.toPath (io/file "test/resources/sample-page.rm")))
         line (vec (take 22 (filter lines/ink? (:strokes (lines/parse bs)))))]
-    (session/start! {:state-root root :ssh-host "no-host" :port port})
+    (start! {:state-root root :ssh-host "no-host" :port port})
     (report-identity!)
     (legacy-observe! nb bs (subvec line 0 11))
     (session/submit "(+ 1 2)" "user")
@@ -279,7 +287,7 @@
         device (str (tmp-root))
         nb (store/notebook-dir root doc)
         bs (Files/readAllBytes (.toPath (io/file "test/resources/sample-page.rm")))]
-    (session/start! {:state-root root :ssh-host "no-host" :port port
+    (start! {:state-root root :ssh-host "no-host" :port port
                      :device {:local-root device}})
     (report-identity!)
     (ink/observe! nb {:page-id page :rm-bytes bs :strokes (:strokes (lines/parse bs))})
@@ -301,27 +309,32 @@
 (deftest archive-is-refused-when-the-device-copy-cannot-be-moved
   (testing "or attaching again would fetch the whole history back"
     (let [root (str (tmp-root))
+          device (str (tmp-root))
           nb (store/notebook-dir root doc)]
-      (session/start! {:state-root root :ssh-host "definitely-no-such-host" :port port})
+      (start! {:state-root root :ssh-host "no-host" :port port :device {:local-root device}})
       (report-identity!)
       (session/submit "(+ 1 2)" "user")
-      (let [r (session/archive-notebook!)]
-        (is (false? (:ok? r)))
-        (is (re-find #"device" (:message r)))
-        (is (.exists nb) "the local history is untouched")))))
+      ;; The device's copy cannot be moved once the notebook was taken.
+      (.setWritable (io/file device) false)
+      (try
+        (let [r (session/archive-notebook!)]
+          (is (false? (:ok? r)))
+          (is (re-find #"device" (:message r)))
+          (is (.exists nb) "the local history is untouched"))
+        (finally (.setWritable (io/file device) true))))))
 
 (deftest another-computer-continues-the-session
   (let [device (str (tmp-root))
         here (str (tmp-root))
         there (str (tmp-root))]
-    (session/start! {:state-root here :ssh-host "no-host" :port port
+    (start! {:state-root here :ssh-host "no-host" :port port
                      :device {:local-root device}})
     (report-identity!)
     (is (:ok? (session/submit "(+ 1 2)" "user")))
     (testing "disconnecting sends what the device does not have yet"
       (session/stop!)
       (is (.exists (io/file device doc "events"))))
-    (session/start! {:state-root there :ssh-host "no-host" :port (next-port)
+    (start! {:state-root there :ssh-host "no-host" :port (next-port)
                      :device {:local-root device}})
     (report-identity!)
     (is (:ok? (session/submit "(* 6 7)" "user")))
@@ -336,7 +349,7 @@
 
 (deftest archive-without-a-notebook-is-not-an-error
   (let [root (str (tmp-root))]
-    (session/start! {:state-root root :ssh-host "no-host" :port port})
+    (start! {:state-root root :ssh-host "no-host" :port port})
     (let [r (session/archive-notebook!)]
       (is (false? (:ok? r)))
       (is (= "no notebook linked" (:message r))))))
@@ -344,7 +357,7 @@
 (deftest status-reports-what-the-buffer-needs
   (let [root (str (tmp-root))]
     (is (false? (:running? (session/status))))
-    (session/start! {:state-root root :ssh-host "no-host" :port port})
+    (start! {:state-root root :ssh-host "no-host" :port port})
     (report-identity!)
     (session/submit "(+ 1 2)" "user")
     (let [s (session/status)]
@@ -353,3 +366,79 @@
       (is (= page (:page (:active s))))
       (is (= {:queued 1} (:deliveries s)))
       (is (empty? (:uncertain s))))))
+
+;; -------- the lease --------
+
+(defn- elsewhere
+  "Another connection, on another computer, holding `doc`'s lease on `device`
+   with a session of its own in `root`."
+  [device root]
+  (let [m (mirror/mirror (store/notebook-dir root doc) doc {:local-root device} "eeee5555")]
+    (is (:ok? (mirror/write-lease! m :none)))
+    m))
+
+(defn- holder [device] (:token (mirror/read-lease (mirror/mirror (tmp-root) doc {:local-root device} "x"))))
+
+(deftest the-tablet-reporting-here-takes-the-notebook-without-asking
+  (let [device (str (tmp-root))
+        other (elsewhere device (str (tmp-root)))]
+    (start! {:state-root (str (tmp-root)) :ssh-host "no-host" :port port
+             :device {:local-root device}})
+    (report-identity!)
+    (is (:ok? (session/submit "(+ 1 2)" "user")))
+    (is (:held? (session/lease)))
+    (is (not= "eeee5555" (holder device)))
+    (testing "after which the old holder's pushes are refused on the device"
+      (store/append-event! (:nb other) {:event :delivery :id "x" :state :queued})
+      (store/append-event! (:nb other) {:event :delivery :id "y" :state :queued})
+      (is (:lease-lost? (mirror/flush! other))))))
+
+(deftest a-connection-that-lost-the-notebook-stops-writing-until-reported-to-again
+  (let [device (str (tmp-root))
+        root (str (tmp-root))]
+    (start! {:state-root root :ssh-host "no-host" :port port
+             :device {:local-root device} :identity-max-age-ms 3000})
+    (report-identity!)
+    (is (:ok? (session/submit "(+ 1 2)" "user")))
+    (let [mine (holder device)
+          other (mirror/mirror (store/notebook-dir (str (tmp-root)) doc)
+                               doc {:local-root device} "eeee5555")]
+      (is (:ok? (mirror/write-lease! other mine)))
+      (testing "it notices on its next copy"
+        (store/append-event! (store/notebook-dir root doc) {:event :delivery :id "x" :state :queued})
+        (is (eventually #(false? (:held? (session/lease))))))
+      (testing "and does not take it back on a report from before it lost it"
+        (Thread/sleep 1500)
+        (is (false? (:held? (session/lease))))
+        (is (= "eeee5555" (holder device))))
+      (testing "but does on reports after"
+        (is (eventually #(do (report-identity!) (:held? (session/lease)))))
+        (is (= mine (holder device)))))))
+
+(deftest reports-resuming-after-a-gap-check-the-lease-again
+  (testing "another computer may have had the tunnel meanwhile"
+    (let [device (str (tmp-root))]
+      (start! {:state-root (str (tmp-root)) :ssh-host "no-host" :port port
+               :device {:local-root device} :identity-max-age-ms 500})
+      (report-identity!)
+      (is (:ok? (session/submit "(+ 1 2)" "user")))
+      (let [mine (holder device)
+            other (mirror/mirror (store/notebook-dir (str (tmp-root)) doc)
+                                 doc {:local-root device} "eeee5555")]
+        (reset! transport/active-page nil)
+        (is (:ok? (mirror/write-lease! other mine)))
+        (Thread/sleep 1000)
+        (is (eventually #(do (report-identity!)
+                             (and (= mine (holder device)) (:held? (session/lease))))))))))
+
+(deftest disconnecting-gives-the-lease-up
+  (let [device (str (tmp-root))]
+    (start! {:state-root (str (tmp-root)) :ssh-host "no-host" :port port
+             :device {:local-root device}})
+    (report-identity!)
+    (is (:ok? (session/submit "(+ 1 2)" "user")))
+    (is (.exists (io/file device doc "lease.edn")))
+    (session/stop!)
+    (is (not (.exists (io/file device doc "lease.edn"))))
+    (testing "having sent everything first"
+      (is (seq (.list (io/file device doc "events")))))))
