@@ -125,3 +125,17 @@
     (let [seqs (map :sequence (store/read-events nb))]
       (is (= seqs (sort seqs)))
       (is (apply distinct? seqs)))))
+
+(deftest a-session-remembers-its-namespace
+  (let [nb (store/notebook-dir (tmp-root) "nb1")]
+    (testing "none until something is evaluated or set"
+      (is (nil? (store/session-namespace nb)))
+      (store/append-event! nb {:event :ink-observed :page-id "p"})
+      (is (nil? (store/session-namespace nb))))
+    (testing "the one its results were evaluated in"
+      (store/create-result! nb (sample "nb1" "p"))
+      (is (= "user" (store/session-namespace nb))))
+    (testing "until another is set"
+      (store/append-event! nb {:event :namespace-set :namespace "fourier.scratch"})
+      (store/append-event! nb {:event :delivery :id "x" :state :queued})
+      (is (= "fourier.scratch" (store/session-namespace nb))))))

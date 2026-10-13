@@ -19,12 +19,14 @@
    One connection writes a session at a time: the one holding its lease, a
    file in the session's directory naming the holder's token. A push is
    refused on the device unless it carries that token."
-  (:require [clojure.edn :as edn]
+  (:require [clojure.data.json :as json]
+            [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
             [clerkenwell.store :as store]
             [clerkenwell.tar :as tar]
-            [clerkenwell.transport :as transport])
+            [clerkenwell.transport :as transport]
+            [clerkenwell.watch :as watch])
   (:import (java.nio.file Files)))
 
 (def device-root "/home/root/clerkenwell")
@@ -122,7 +124,13 @@
         "if [ \"$cur\" = \"$3\" ]; then rm -f \"$d/lease.edn\"; fi")
 
    :archive
-   "d=$1/$2; [ ! -d \"$d\" ] || mv \"$d\" \"$d.archived-$3\""})
+   "d=$1/$2; [ ! -d \"$d\" ] || mv \"$d\" \"$d.archived-$3\""
+
+   ;; Run in Xochitl's document directory, not the sessions': what the
+   ;; tablet knows about the notebook, its name among it. Nothing when it
+   ;; has none.
+   :metadata
+   "cat \"$1/$2.metadata\" 2>/dev/null; true"})
 
 (def ^:private arg-re
   ;; A device path, a notebook id, a token or an archive stamp. Nothing here
@@ -141,9 +149,13 @@
 (defn- exec!
   "Run `script` on the device -- over SSH, or for `:local-root`, with this
    machine's sh, which is how the scripts are tested -- with `in` on stdin.
+   `:xochitl-root` stands in for Xochitl's document directory likewise.
    Returns {:exit :out bytes :err string}."
-  [{:keys [ssh-host local-root]} script args ^bytes in]
-  (let [args (cons (or local-root device-root) args)
+  [{:keys [ssh-host local-root xochitl-root]} script args ^bytes in]
+  (let [args (cons (if (= :metadata script)
+                     (or xochitl-root watch/xochitl-root)
+                     (or local-root device-root))
+                   args)
         cmd (command script args)
         argv (if local-root
                (concat ["sh" "-c" (scripts script) "ckw"] args)
@@ -398,6 +410,17 @@
     {:ok? true}
     (catch Exception e
       {:ok? false :message (.getMessage e)})))
+
+;; -------- what the tablet calls a notebook --------
+
+(defn notebook-name
+  "The notebook's name as the tablet shows it, or nil when it has none.
+   Throws when the device cannot be asked."
+  [device notebook-id]
+  (let [text (exec-text! device :metadata [notebook-id] nil)]
+    (when-not (str/blank? text)
+      (let [n (get (json/read-str text) "visibleName")]
+        (when (and (string? n) (not (str/blank? n))) n)))))
 
 ;; -------- setting a session aside --------
 

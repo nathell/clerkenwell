@@ -102,9 +102,20 @@ M-x load-file RET emacs/clerkenwell.el RET
 M-x clerkenwell-open RET
 ```
 
-`clerkenwell-open` starts the session inside *your* REPL, so submissions see
+`clerkenwell-open` connects *your* REPL to the tablet, so submissions see
 your namespaces and live state. `C-c C-s` evaluates the draft and commits it;
 ordinary CIDER evaluation in the buffer sends nothing to the tablet.
+
+Each notebook has its own buffer, named as the tablet names it:
+`*clerkenwell: Fourier scratch*`. Opening another notebook on the tablet
+brings up its buffer in place of the one you were looking at; the others keep
+their history, and say `not open on the tablet` until their notebook is open
+again.
+
+A notebook remembers the namespace its submissions are evaluated in, and the
+mode line shows it. One that has none yet takes the namespace current where
+you ran `clerkenwell-open`; `C-c C-n` (`clerkenwell-set-namespace`) changes it.
+Ordinary CIDER evaluation in the buffer uses the same namespace.
 
 Handwriting images follow your Emacs theme -- they are shown in the buffer and
 never sent to the device, so they have no reason to be ink-on-paper.

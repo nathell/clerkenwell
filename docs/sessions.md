@@ -1,6 +1,6 @@
 # Sessions on the device
 
-Status: design; steps 1 to 3 of the plan are implemented.
+Status: implemented, steps 1 to 4; see *Later* for what remains.
 
 Today a notebook's history lives on the computer, under
 `clerkenwell-state-root`, relative to the REPL's working directory: it sits next
@@ -64,7 +64,6 @@ do not fight over them.
 
 ```
 /home/root/clerkenwell/<notebook-uuid>/
-  session.edn
   lease.edn
   events/<sequence>.edn
   results/<result-uuid>/record.edn
@@ -77,34 +76,32 @@ ever sees a file it does not know, and the live `.rm` files are never touched.
 `/home` survives firmware updates. A notebook's UUID is stable across renames
 and moves; duplicating a notebook gives a new UUID, and so a new session.
 
-`session.edn` says what the session is:
-
-```clojure
-{:schema-version 1
- :notebook-id "0c51c0c2-..."
- :namespace "fourier.scratch"   ; submissions are evaluated here
- :created-at "2026-10-10T..."}
-```
+A session's namespace is part of its history, not a file of its own: every
+result's record names the namespace it was evaluated in, and changing it
+appends a `:namespace-set` event. The last of either is the session's
+namespace. So every file stays immutable, and the copy needs nothing beyond
+what it does for events.
 
 The local cache moves out of the project, to `~/.cache/clerkenwell/` (or the
 platform's equivalent), with the same layout plus the derived parts.
 
 ## Writing
 
-Every event is published locally as now, then pushed to the device, where it is
-published the same way: a temp file in the same directory, then a rename. The
-bytes travel on stdin; the remote command is a small fixed script whose only
-arguments are a validated UUID, a sequence number and a hex lease token. No
-user source and no notebook name ever reaches a shell.
+Every file is published locally as now, then copied to the device. There is
+no outbox: canonical files are immutable and named by what they are, so what
+remains to send is the local files the device does not have yet. Every couple
+of seconds they travel as one tar on stdin of a single SSH call, are unpacked
+aside, and moved into place a file at a time, events last and in order. The
+remote command is a small fixed script whose only arguments are a validated
+path, UUID and hex lease token; file names travel inside the tar. No user
+source and no notebook name ever reaches a shell.
 
-Pushes go through an outbox, in order. Most are asynchronous: a lost tail
-costs little, because nothing in it has reached the page, and ink observations
-are recovered by the next computer's diff against the last snapshot on the
-device.
+Most copying is asynchronous: a lost tail costs little, because nothing in it
+has reached the page, and ink observations are recovered by the next
+computer's diff against the last snapshot on the device.
 
-Delivery is the exception. `:insertion-started` is pushed **synchronously,
-before** the insert command is sent, and a synchronous push first flushes
-everything queued before it. So whatever may be on the page is always in the
+Delivery is the exception. `:insertion-started` is copied **synchronously,
+before** the insert command is sent, with everything before it. So whatever may be on the page is always in the
 device's log, and a computer that takes over sees an unacknowledged insertion
 as `:uncertain` rather than replaying it.
 
@@ -115,13 +112,12 @@ When the tablet reports a notebook, the connection:
 1. reads the lease (below);
 2. pulls every event, result and snapshot it does not already have;
 3. replays the manifest and redraws handwriting it is missing, locally;
-4. if `session.edn` does not exist, the notebook has no session yet: one is
-   created when the first result is submitted, with the REPL's current
-   namespace.
+4. a notebook with no namespace yet gets one with its first result: the
+   namespace current where `clerkenwell-open` was run.
 
 Because only one connection writes at a time and it syncs fully before
 writing, the local copy of the log is always a prefix of the device's, plus
-this connection's own unflushed outbox.
+what this connection has not copied yet.
 
 ## The lease
 
@@ -182,8 +178,9 @@ namespace cannot be found in this REPL, submitting says so, and
 
 - One buffer per session, named from the notebook's visible name in its
   `.metadata`: `*clerkenwell: Fourier scratch*`. The tablet's open document
-  decides which buffer is live; the others keep their history, read-only
-  until their document is open again.
+  decides which buffer is live, and its buffer is shown in place of the one
+  in view when the tablet changes notebook; the others keep their history,
+  and accept no submissions until their document is open again.
 - `clerkenwell-open` attaches this REPL; run again, it reuses the connection.
 - A connection that has lost the lease is marked `read-only` in the mode
   line, until the tablet reports to it again.
@@ -198,8 +195,7 @@ namespace cannot be found in this REPL, submitting says so, and
 2. **Device copy, one computer.** The outbox and remote publish script; pull
    on attach; synchronous `:insertion-started`.
 3. **The lease.** Take on report, check on push, set diverged events aside.
-4. **Session identity.** `session.edn`, the remembered namespace, one buffer
-   per session.
+4. **Session identity.** The remembered namespace, one buffer per session.
 
 ## Later
 
@@ -219,4 +215,6 @@ namespace cannot be found in this REPL, submitting says so, and
   lost it. (Asking before taking over was tried first, and dropped: the
   computer the tablet reports to is the one in use.)
 - Binding to code is loose: the session remembers its namespace, nothing more.
+  It is kept in the event log rather than a `session.edn`, so that every file
+  on the device stays immutable.
 - Existing histories stay where they are until the rest works.

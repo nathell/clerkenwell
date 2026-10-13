@@ -416,5 +416,38 @@ colours through the buffer's own font-lock."
                           (clerkenwell--copy-description
                            (parseedn-read-str "{:ok? false :message \"asleep\"}")))))
 
+;;; One buffer per notebook
+
+(defmacro clerkenwell-test--with-clean-buffers (&rest body)
+  "Run BODY, killing the Clerkenwell buffers it makes."
+  `(unwind-protect (progn ,@body)
+     (mapc #'kill-buffer (clerkenwell--buffers))))
+
+(ert-deftest clerkenwell-test-each-notebook-has-its-own-buffer ()
+  (clerkenwell-test--with-clean-buffers
+   (let* ((waiting (clerkenwell--setup (get-buffer-create "*clerkenwell*")))
+          (a (clerkenwell--notebook-buffer "aaaaaaaa-0000" "Fourier scratch")))
+     (should (eq a waiting))
+     (should (equal (buffer-name a) "*clerkenwell: Fourier scratch*"))
+     (let ((b (clerkenwell--notebook-buffer "bbbbbbbb-0000" nil)))
+       (should-not (eq a b))
+       (should (equal (buffer-name b) "*clerkenwell: bbbbbbbb*"))
+       (should (eq a (clerkenwell--notebook-buffer "aaaaaaaa-0000" "Fourier scratch")))
+       (should (eq b (clerkenwell--buffer-for "bbbbbbbb-0000")))))))
+
+(ert-deftest clerkenwell-test-a-renamed-notebook-renames-its-buffer ()
+  (clerkenwell-test--with-clean-buffers
+   (let ((a (clerkenwell--notebook-buffer "aaaaaaaa-0000" "Old")))
+     (clerkenwell--notebook-buffer "aaaaaaaa-0000" "New")
+     (should (equal (buffer-name a) "*clerkenwell: New*")))))
+
+(ert-deftest clerkenwell-test-windows-follow-the-tablet ()
+  (clerkenwell-test--with-clean-buffers
+   (let ((a (clerkenwell--notebook-buffer "aaaaaaaa-0000" "A"))
+         (b (clerkenwell--notebook-buffer "bbbbbbbb-0000" "B")))
+     (set-window-buffer (selected-window) a)
+     (clerkenwell--follow b)
+     (should (eq b (window-buffer (selected-window)))))))
+
 (provide 'clerkenwell-test)
 ;;; clerkenwell-test.el ends here

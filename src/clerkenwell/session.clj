@@ -176,18 +176,30 @@
       (do (swap! (:state att) assoc :retry-at (+ (System/currentTimeMillis) 5000))
           false)))
 
+(defn- note-name!
+  "Ask the tablet what it calls `att`'s notebook, which can change any time."
+  [s att]
+  (try
+    (when-let [n (mirror/notebook-name (device s) (:notebook-id att))]
+      (swap! (:state att) assoc :name n))
+    (catch Exception _ nil)))
+
 (defn- start-copier!
   "Send what is new in `att` to the device every two seconds, while this
-   connection holds its lease."
-  [att]
+   connection holds its lease, and look for the notebook being renamed every
+   thirty."
+  [s att]
   (doto (Thread.
          (fn []
-           (while (not @(:stop att))
-             (try
-               (when (and (held? att) (:lease-lost? (mirror/flush! (:mirror att))))
-                 (lose! att))
-               (catch Exception _ nil))
-             (Thread/sleep 2000))))
+           (loop [tick 1]
+             (when-not @(:stop att)
+               (try
+                 (when (and (held? att) (:lease-lost? (mirror/flush! (:mirror att))))
+                   (lose! att))
+                 (when (zero? (mod tick 15)) (note-name! s att))
+                 (catch Exception _ nil))
+               (Thread/sleep 2000)
+               (recur (inc tick))))))
     (.setDaemon true)
     (.setName (str "clerkenwell-copy-" (:notebook-id att)))
     (.start)))
@@ -223,6 +235,12 @@
   [doc]
   (let [att (:attachment @connection)]
     (and (= doc (:notebook-id att)) (held? att))))
+
+(defn- notebook-dir-for
+  "The store of `notebook-id`, or of the attached notebook when nil."
+  [s notebook-id]
+  (when-let [id (or notebook-id (:notebook-id s))]
+    (store/notebook-dir (:state-root s) id)))
 
 (defn- lease-token []
   (let [bs (byte-array 16)]
@@ -327,8 +345,9 @@
               ;; An unreachable device leaves the notebook unwritable here, and
               ;; the next report tries again; without SSH nothing could be
               ;; written to the page anyway.
+              (note-name! s att)
               (try-take! s att)
-              (start-copier! att)
+              (start-copier! s att)
               ;; The connection may have been stopped, and another started,
               ;; while this one was fetching. Attach only to the one asked.
               (let [same? #(identical? (:token %) (:token s))
@@ -343,6 +362,11 @@
   []
   (when-let [att (:attachment @connection)]
     {:held? (held? att)}))
+
+(defn- notebook-name
+  "What the tablet calls the attached notebook, if it has said."
+  [s]
+  (some-> s :attachment :state deref :name))
 
 (defn- unwritable-message
   "Why the attached notebook cannot be written here, in words."
@@ -399,6 +423,8 @@
        :state-root (:state-root s)
        :port (:port s)
        :notebook-id (:notebook-id s)
+       :name (notebook-name s)
+       :namespace (some-> nb store/session-namespace)
        :active live
        :evaluating? @evaluating
        ;; The device's copy of the session: {:ok? :pending :message}.
@@ -413,9 +439,17 @@
 
 ;; -------- submission --------
 
+(defn- namespace-for
+  "The namespace `notebook-id`'s submissions are evaluated in: the one it
+   remembers, or `default` for a notebook that has none yet."
+  [s notebook-id default]
+  (or (store/session-namespace (store/notebook-dir (:state-root s) notebook-id))
+      default))
+
 (defn submit
-  "Evaluate `source` once in `ns-name` and commit the result to the page the
-   device currently shows.
+  "Evaluate `source` once in the notebook's namespace and commit the result to
+   the page the device currently shows. A notebook remembers the namespace its
+   results were evaluated in; `ns-name` is used for one that has none yet.
 
    Runs in THIS JVM, so `source` sees everything your REPL sees. Returns a map
    the Emacs buffer renders; `:ok? false` carries `:stage` and `:message`
@@ -426,7 +460,9 @@
    `opts` may carry `:include-source? true` to write the expression above its
    result on the tablet. Emacs records both regardless; this only controls what
    the page receives. `:strict-height? false` lets the result run below the
-   bottom of the screen, onto the part of a scrollable page you scroll to."
+   bottom of the screen, onto the part of a scrollable page you scroll to.
+   `:notebook-id` says which notebook the submission is meant for, and is
+   refused unless the tablet has that one open."
   ([source ns-name] (submit source ns-name nil))
   ([source ns-name opts]
     (let [s @connection]
@@ -445,9 +481,9 @@
              {:ok? false :stage :identity
               :message "the device has not reported a page recently; is the tunnel up?"}
 
-             (nil? (find-ns (symbol ns-name)))
-             {:ok? false :stage :namespace
-              :message (str "namespace not loaded in this REPL: " ns-name)}
+             (and (:notebook-id opts) (not= (:notebook-id opts) (:doc live)))
+             {:ok? false :stage :identity
+              :message "this notebook is not the one open on the tablet"}
 
              (do (ensure-watching! live)
                  (not (writable? (:doc live))))
@@ -455,9 +491,15 @@
              ;; submitting again is safe.
              {:ok? false :stage :lease :message (unwritable-message)}
 
+             (nil? (find-ns (symbol (namespace-for s (:doc live) ns-name))))
+             {:ok? false :stage :namespace
+              :message (str "namespace not loaded in this REPL: "
+                            (namespace-for s (:doc live) ns-name))}
+
              :else
              (let [{:keys [doc page]} live
                    nb (store/notebook-dir (:state-root s) doc)
+                   ns-name (namespace-for s doc ns-name)
                    prev-bottom (->> (vals (store/read-manifest nb))
                                     (filter #(= page (:page-id %)))
                                     (keep #(get-in % [:placement :bottom]))
@@ -490,22 +532,39 @@
 
 ;; -------- delivery, without evaluating again --------
 
-(defn- with-notebook [f]
-  (if-let [s @connection]
-    (if-let [id (:notebook-id s)]
-      (f (store/notebook-dir (:state-root s) id))
-      {:ok? false :message "no notebook linked yet"})
-    {:ok? false :message "not connected"}))
+(defn- with-notebook
+  "Call `f` with the store of `notebook-id`, or of the attached notebook when
+   nil."
+  ([f] (with-notebook nil f))
+  ([notebook-id f]
+   (if-let [s @connection]
+     (if-let [nb (notebook-dir-for s notebook-id)]
+       (f nb)
+       {:ok? false :message "no notebook linked yet"})
+     {:ok? false :message "not connected"})))
 
 (defn- with-held-notebook
   "As `with-notebook`, for changes to its history, which only the holder of
-   its lease may make."
-  [f]
-  (with-notebook
-    (fn [nb]
-      (if (writable? (.getName (io/file nb)))
-        (f nb)
-        {:ok? false :message (unwritable-message)}))))
+   its lease may make: the notebook must be the one the tablet has open."
+  ([f] (with-held-notebook nil f))
+  ([notebook-id f]
+   (with-notebook notebook-id
+     (fn [nb]
+       (cond
+         (and notebook-id (not= notebook-id (:notebook-id @connection)))
+         {:ok? false :message "this notebook is not the one open on the tablet"}
+         (writable? (.getName (io/file nb))) (f nb)
+         :else {:ok? false :message (unwritable-message)})))))
+
+(defn set-namespace!
+  "Evaluate the attached notebook's submissions in `ns-name` from now on.
+   When `notebook-id` is given, it must be the attached one."
+  ([ns-name] (set-namespace! ns-name nil))
+  ([ns-name notebook-id]
+   (with-held-notebook notebook-id
+     (fn [nb]
+       (store/append-event! nb {:event :namespace-set :namespace ns-name})
+       {:ok? true :namespace ns-name}))))
 
 (defn retry-delivery
   "Resume a definitely-uninserted result with its existing id and asset."
@@ -535,14 +594,18 @@
    Note this only clears what the HOST remembers. Ink already on the page will
    be observed again as a fresh initial entry, because that is what a first
    observation means -- and it is what keeps placement below it correct. For a
-   genuinely blank slate, start on a blank page too."
-  []
+   genuinely blank slate, start on a blank page too.
+
+   When `notebook-id` is given, it must be the attached one."
+  [& [notebook-id]]
   (locking attach-lock
     (let [s @connection
           id (:notebook-id s)]
       (cond
         (nil? s) {:ok? false :message "not connected"}
         (nil? id) {:ok? false :message "no notebook linked"}
+        (and notebook-id (not= notebook-id id))
+        {:ok? false :message "this notebook is not the one open on the tablet"}
         (not (writable? id))
         {:ok? false :message (unwritable-message)}
         :else
@@ -584,20 +647,27 @@
     {:ok? false :message "not connected"}))
 
 (defn history-version
-  "A monotonic marker that changes whenever history grows.
+  "A monotonic marker that changes whenever the history of `notebook-id`
+   grows -- the attached notebook's, when not given -- and what Emacs needs
+   to know which notebook its buffers are for.
 
    Cheap enough to poll: it reads the event directory listing, not the events.
    The Emacs buffer uses it to avoid refetching history that has not changed.
-   :held? says whether this connection may write the notebook, which changes
-   without history changing when the lease is taken or lost."
-  []
-  (if-let [s @connection]
-    (if-let [id (:notebook-id s)]
-      {:ok? true
-       :version (store/next-sequence (store/notebook-dir (:state-root s) id))
-       :held? (writable? id)}
-      {:ok? true :version 0})
-    {:ok? false :version 0}))
+   :notebook-id is the attached notebook, :name what the tablet calls it.
+   :held? says whether this connection may write it, which changes without
+   history changing when the lease is taken or lost."
+  ([] (history-version nil))
+  ([notebook-id]
+   (if-let [s @connection]
+     (let [attached (:notebook-id s)
+           nb (notebook-dir-for s notebook-id)]
+       (cond-> {:ok? true
+                :version (if nb (store/next-sequence nb) 0)
+                :notebook-id attached}
+         attached (assoc :held? (writable? attached)
+                         :name (notebook-name s))
+         nb (assoc :namespace (store/session-namespace nb))))
+     {:ok? false :version 0})))
 
 (defn history
   "The ordered history for the linked notebook: computations and handwriting,
@@ -605,9 +675,12 @@
 
    Observation order is not exact physical writing order -- a delayed save can
    batch strokes. An entry stays where its first strokes were observed; later
-   ink that overlaps it vertically joins it there."
-  []
-  (with-notebook
+   ink that overlaps it vertically joins it there.
+
+   The history of `notebook-id`, when given, whether or not the tablet has it
+   open: it is read from this computer's copy."
+  [& [notebook-id]]
+  (with-notebook notebook-id
     (fn [nb]
       (let [m (store/read-manifest nb)
             events (store/read-events nb)
@@ -665,9 +738,10 @@
 
 (defn regroup
   "Retroactively merge handwriting entries that overlap vertically, as live
-   observation now does. Safe to repeat: a second run finds nothing to do."
-  []
-  (with-held-notebook
+   observation now does. Safe to repeat: a second run finds nothing to do.
+   When `notebook-id` is given, it must be the attached one."
+  [& [notebook-id]]
+  (with-held-notebook notebook-id
     (fn [nb]
       (let [r (ink/regroup! nb nil (:render-opts @connection))]
         (assoc r :ok? true :merged (reduce + (map (comp count :entries) (:joined r))))))))

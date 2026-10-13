@@ -118,6 +118,19 @@
   (is (false? (:ok? (mirror/archive! "x; rm -rf /" {:local-root "/tmp"} "1"))))
   (is (false? (:ok? (mirror/archive! doc {:local-root "/tmp"} "../x")))))
 
+;; -------- what the tablet calls a notebook --------
+
+(deftest the-name-comes-from-the-notebooks-metadata
+  (let [xochitl (tmp-dir "ckw-x-")
+        device {:local-root (str (tmp-dir "ckw-d-")) :xochitl-root (str xochitl)}]
+    (testing "nil when the tablet has none"
+      (is (nil? (mirror/notebook-name device doc))))
+    (spit (io/file xochitl (str doc ".metadata"))
+          "{\n    \"type\": \"DocumentType\",\n    \"visibleName\": \"Fourier \\\"scratch\\\" \\u00e9\"\n}\n")
+    (is (= "Fourier \"scratch\" \u00e9" (mirror/notebook-name device doc)))
+    (testing "an odd id never reaches the shell"
+      (is (thrown? Exception (mirror/notebook-name device "x; rm -rf /"))))))
+
 ;; -------- the lease --------
 
 (deftest the-lease-is-taken-renewed-and-released

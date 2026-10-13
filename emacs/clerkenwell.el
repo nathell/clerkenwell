@@ -5,9 +5,10 @@
 
 ;;; Commentary:
 
-;; A minor mode over `clojure-mode' providing one interaction buffer per linked
-;; notebook: a read-only ordered history, then an editable tail holding the
-;; expression you are working on.
+;; A minor mode over `clojure-mode' providing one interaction buffer per
+;; notebook on the tablet: a read-only ordered history, then an editable tail
+;; holding the expression you are working on.  The buffers follow the tablet:
+;; opening another notebook there brings up its buffer here.
 ;;
 ;; Evaluation happens in your own CIDER session, through `clerkenwell.session',
 ;; which must be on that JVM's classpath.  Ordinary `cider-eval-*' commands are
@@ -140,11 +141,27 @@ over a slow connection or in a terminal frame."
 (defvar-local clerkenwell--history-end nil
   "Marker at the end of the protected history region.")
 
+(defvar-local clerkenwell--notebook-id nil
+  "The notebook this buffer is for; nil until the tablet has reported one.")
+
+(defvar-local clerkenwell--notebook-name nil
+  "What the tablet calls this buffer's notebook, when it has said.")
+
 (defvar-local clerkenwell--namespace nil
-  "Namespace submissions are evaluated in.")
+  "Namespace this notebook's submissions are evaluated in, as last reported.")
 
 (defvar-local clerkenwell--connection nil
   "The CIDER connection buffer this buffer submits through.")
+
+(defvar clerkenwell--repl nil
+  "The CIDER connection the tablet is connected through.")
+
+(defvar clerkenwell--default-namespace nil
+  "Namespace for a notebook that has none yet.
+The one current where `clerkenwell-open' was run.")
+
+(defvar clerkenwell--attached nil
+  "The notebook the tablet had open at the last poll.")
 
 (defvar-local clerkenwell--draft-revision 0
   "Incremented on every draft edit, to detect edits made during evaluation.")
@@ -155,8 +172,8 @@ over a slow connection or in a terminal frame."
 (defvar-local clerkenwell--status ""
   "Last status string, shown in the mode line.")
 
-(defvar-local clerkenwell--poll-timer nil
-  "Timer polling for new history entries.")
+(defvar clerkenwell--poll-timer nil
+  "Timer polling for new history entries and for the tablet changing notebook.")
 
 (defvar-local clerkenwell--history-version nil
   "Last history version seen, so unchanged history is not refetched.")
@@ -192,9 +209,14 @@ Escaping rather than interpolation: the draft is arbitrary user text."
            s t t)
           "\""))
 
+(defun clerkenwell--clj-id ()
+  "This buffer's notebook id as a Clojure literal: nil when it has none."
+  (if clerkenwell--notebook-id (clerkenwell--clj-string clerkenwell--notebook-id) "nil"))
+
 (defun clerkenwell--connection-buffer ()
   "The CIDER connection to use, erroring if there is none."
   (or clerkenwell--connection
+      clerkenwell--repl
       (cider-current-repl nil 'ensure)))
 
 (defun clerkenwell--eval-async (code callback)
@@ -506,40 +528,107 @@ text, point and mark are restored around the rewrite."
 ;;; ------------------------------------------------------------------
 ;;; Commands
 
-;;;###autoload
-(defun clerkenwell-open (namespace)
-  "Open the Clerkenwell buffer, connecting the current REPL to the tablet.
-NAMESPACE is the namespace submissions are evaluated in."
-  (interactive (list (cider-read-from-minibuffer
-                      "Evaluate submissions in namespace: " (cider-current-ns))))
-  (let* ((conn (cider-current-repl nil 'ensure))
-         (buf (get-buffer-create "*clerkenwell*")))
+;;; ------------------------------------------------------------------
+;;; One buffer per notebook
+
+(defun clerkenwell--buffers ()
+  "The live Clerkenwell buffers."
+  (seq-filter (lambda (b) (buffer-local-value 'clerkenwell-mode b)) (buffer-list)))
+
+(defun clerkenwell--buffer-for (notebook-id)
+  "The buffer for NOTEBOOK-ID, if there is one."
+  (seq-find (lambda (b) (equal notebook-id
+                               (buffer-local-value 'clerkenwell--notebook-id b)))
+            (clerkenwell--buffers)))
+
+(defun clerkenwell--buffer-name (notebook-id name)
+  "What to call the buffer for NOTEBOOK-ID, which the tablet calls NAME."
+  (if notebook-id
+      (format "*clerkenwell: %s*" (or name (substring notebook-id 0 8)))
+    "*clerkenwell*"))
+
+(defun clerkenwell--setup (buf)
+  "Make BUF a Clerkenwell buffer, submitting through `clerkenwell--repl'."
+  (with-current-buffer buf
+    (unless (derived-mode-p 'clojure-mode) (clojure-mode))
+    (setq clerkenwell--connection clerkenwell--repl)
+    (clerkenwell-mode 1))
+  buf)
+
+(defun clerkenwell--notebook-buffer (notebook-id name)
+  "The buffer for NOTEBOOK-ID, which the tablet calls NAME.
+A buffer still waiting for its first notebook takes it; otherwise one is
+made.  Named after the notebook, and renamed when the notebook is."
+  (let ((buf (or (clerkenwell--buffer-for notebook-id)
+                 (clerkenwell--buffer-for nil)
+                 (clerkenwell--setup
+                  (generate-new-buffer (clerkenwell--buffer-name notebook-id name))))))
     (with-current-buffer buf
-      (unless (derived-mode-p 'clojure-mode) (clojure-mode))
-      (setq clerkenwell--connection conn
-            clerkenwell--namespace namespace)
-      (clerkenwell-mode 1)
-      (let* ((started (clerkenwell--eval-sync
-                       (format "(do (require 'clerkenwell.session) (clerkenwell.session/start! {:state-root %s :ssh-host %s :port %d :render-opts %s}))"
-                               (if clerkenwell-state-root
-                                   (clerkenwell--clj-string clerkenwell-state-root)
-                                 "nil")
-                               (clerkenwell--clj-string (clerkenwell--ssh-destination))
-                               clerkenwell-port
-                               (clerkenwell--render-opts)))))
-        ;; A nil result means the eval itself failed -- most often because
-        ;; clerkenwell.session is not on this REPL's classpath. Saying
-        ;; "already running" there would hide a real problem.
-        (unless started
-          (user-error
-           "Clerkenwell: could not connect. Is clerkenwell.session on the classpath?"))
-        (setq clerkenwell--status
-              (if (clerkenwell--get started :already-running?)
-                  "reusing connection" "started")))
-      (clerkenwell-refresh)
-      (clerkenwell--start-polling)
-      (clerkenwell-check-device))
-    (pop-to-buffer buf)))
+      (unless (and (equal clerkenwell--notebook-id notebook-id)
+                   (equal clerkenwell--notebook-name name))
+        (setq clerkenwell--notebook-id notebook-id
+              clerkenwell--notebook-name name
+              clerkenwell--history-version nil)
+        (rename-buffer (clerkenwell--buffer-name notebook-id name) t)))
+    buf))
+
+(defun clerkenwell--follow (buf)
+  "Show BUF in the windows showing another notebook's buffer.
+Called when the tablet opens another notebook, so the buffer in view is
+the one whose page is in front of you."
+  (dolist (b (clerkenwell--buffers))
+    (unless (eq b buf)
+      (dolist (w (get-buffer-window-list b nil t))
+        (set-window-buffer w buf)))))
+
+;;; ------------------------------------------------------------------
+;;; Commands
+
+;;;###autoload
+(defun clerkenwell-open ()
+  "Connect the current REPL to the tablet, and show the open notebook's buffer.
+
+Each notebook has its own buffer, and remembers the namespace its
+submissions are evaluated in.  A notebook that has none yet takes the
+namespace current here; `clerkenwell-set-namespace' changes it."
+  (interactive)
+  (let ((conn (cider-current-repl nil 'ensure))
+        (ns (cider-current-ns)))
+    (setq clerkenwell--repl conn
+          clerkenwell--default-namespace ns)
+    (let ((started (clerkenwell--eval-sync
+                    (format "(do (require 'clerkenwell.session) (clerkenwell.session/start! {:state-root %s :ssh-host %s :port %d :render-opts %s}))"
+                            (if clerkenwell-state-root
+                                (clerkenwell--clj-string clerkenwell-state-root)
+                              "nil")
+                            (clerkenwell--clj-string (clerkenwell--ssh-destination))
+                            clerkenwell-port
+                            (clerkenwell--render-opts)))))
+      ;; A nil result means the eval itself failed -- most often because
+      ;; clerkenwell.session is not on this REPL's classpath. Saying
+      ;; "already running" there would hide a real problem.
+      (unless started
+        (user-error
+         "Clerkenwell: could not connect. Is clerkenwell.session on the classpath?"))
+      (let* ((v (clerkenwell--eval-sync "(clerkenwell.session/history-version)"))
+             (id (and v (clerkenwell--get v :notebook-id)))
+             (buf (if id
+                      (clerkenwell--notebook-buffer id (clerkenwell--get v :name))
+                    (or (clerkenwell--buffer-for nil)
+                        (clerkenwell--setup (get-buffer-create "*clerkenwell*"))))))
+        (setq clerkenwell--attached id)
+        (dolist (b (clerkenwell--buffers))
+          (with-current-buffer b (setq clerkenwell--connection conn)))
+        (with-current-buffer buf
+          (clerkenwell-refresh)
+          (unless id
+            (setq clerkenwell--status
+                  (if (clerkenwell--get started :already-running?)
+                      "reusing connection; waiting for the tablet"
+                    "waiting for the tablet")))
+          (clerkenwell--start-polling)
+          (clerkenwell-check-device))
+        (pop-to-buffer buf)))))
 
 (defun clerkenwell--copy-description (copy)
   "How the tablet's copy of the session stands, from COPY, in words."
@@ -583,7 +672,10 @@ line looks healthy."
 (defun clerkenwell-refresh ()
   "Fetch history and device state without evaluating anything."
   (interactive)
-  (let* ((h (clerkenwell--eval-sync "(clerkenwell.session/history)"))
+  (let* ((h (and clerkenwell--notebook-id
+                 (clerkenwell--eval-sync
+                  (format "(clerkenwell.session/history %s)"
+                          (clerkenwell--clj-string clerkenwell--notebook-id)))))
          (entries (and h (clerkenwell--get h :entries))))
     (clerkenwell--rebuild-history (append entries nil))
     (clerkenwell--update-status)))
@@ -591,27 +683,42 @@ line looks healthy."
 (defun clerkenwell--update-status ()
   "Refresh the mode-line status from the session."
   (let ((s (clerkenwell--eval-sync "(clerkenwell.session/status)")))
+    (when (and s (equal clerkenwell--notebook-id (clerkenwell--get s :notebook-id)))
+      (clerkenwell--note-namespace (clerkenwell--get s :namespace)))
     (setq clerkenwell--status
-          (if (and s (clerkenwell--get s :running?))
-              (let* ((active (clerkenwell--get s :active))
-                     (page (and active (clerkenwell--name
-                                        (clerkenwell--get active :page))))
-                     (uncertain (clerkenwell--get s :uncertain))
-                     (copy (clerkenwell--get s :copy))
-                     (lease (clerkenwell--get s :lease)))
-                (concat (when (and lease (not (clerkenwell--get lease :held?)))
-                          "read-only ")
-                        (if (and page (not (string-empty-p page)))
-                            (format "page %s" (substring page 0 (min 8 (length page))))
-                          "no page")
-                        (when (and uncertain (> (length uncertain) 0))
-                          (format " ⚠%d uncertain" (length uncertain)))
-                        ;; History is kept on the tablet too; say when it
-                        ;; is not reaching it.
-                        (when (and copy (not (clerkenwell--get copy :ok?)))
-                          " ⚠not copied to tablet")))
-            "not running"))
+          (cond
+           ((not (and s (clerkenwell--get s :running?))) "not running")
+           ((null clerkenwell--notebook-id) "waiting for the tablet")
+           ((not (equal clerkenwell--notebook-id (clerkenwell--get s :notebook-id)))
+            "not open on the tablet")
+           (t
+            (let* ((active (clerkenwell--get s :active))
+                   (page (and active (clerkenwell--name
+                                      (clerkenwell--get active :page))))
+                   (uncertain (clerkenwell--get s :uncertain))
+                   (copy (clerkenwell--get s :copy))
+                   (lease (clerkenwell--get s :lease)))
+              (concat (when (and lease (not (clerkenwell--get lease :held?)))
+                        "read-only ")
+                      (when clerkenwell--namespace
+                        (format "%s, " clerkenwell--namespace))
+                      (if (and page (not (string-empty-p page)))
+                          (format "page %s" (substring page 0 (min 8 (length page))))
+                        "no page")
+                      (when (and uncertain (> (length uncertain) 0))
+                        (format " ⚠%d uncertain" (length uncertain)))
+                      ;; History is kept on the tablet too; say when it
+                      ;; is not reaching it.
+                      (when (and copy (not (clerkenwell--get copy :ok?)))
+                        " ⚠not copied to tablet"))))))
     (force-mode-line-update)))
+
+(defun clerkenwell--note-namespace (ns)
+  "Note that this notebook is evaluated in NS, when it says.
+Ordinary CIDER evaluation in the buffer uses it too."
+  (when ns
+    (setq clerkenwell--namespace ns
+          cider-buffer-ns ns)))
 
 (defun clerkenwell-evaluate-and-send (&optional invert)
   "Evaluate the draft once and commit its result to the tablet.
@@ -631,6 +738,8 @@ customised that variable the other way)."
     (message "Clerkenwell: an evaluation is already in flight"))
    ((string-blank-p (or (clerkenwell-draft) ""))
     (message "Clerkenwell: nothing to evaluate"))
+   ((null clerkenwell--notebook-id)
+    (message "Clerkenwell: no notebook open on the tablet yet"))
    (t
     (let* ((source (clerkenwell-draft))
            (revision clerkenwell--draft-revision)
@@ -640,9 +749,13 @@ customised that variable the other way)."
             clerkenwell--status "evaluating…")
       (force-mode-line-update)
       (clerkenwell--eval-async
-       (format "(clerkenwell.session/submit %s %s {:include-source? %s :strict-height? %s})"
+       (format "(clerkenwell.session/submit %s %s {:notebook-id %s :include-source? %s :strict-height? %s})"
                (clerkenwell--clj-string source)
-               (clerkenwell--clj-string clerkenwell--namespace)
+               ;; Only for a notebook that has no namespace yet.
+               (clerkenwell--clj-string (or clerkenwell--namespace
+                                            clerkenwell--default-namespace
+                                            "user"))
+               (clerkenwell--clj-string clerkenwell--notebook-id)
                (if with-source "true" "false")
                (if clerkenwell-strict-height "true" "false"))
        (lambda (result err)
@@ -673,6 +786,22 @@ customised that variable the other way)."
                     (or (clerkenwell--get result :message)
                         (clerkenwell--get result :reason)))))))))))
 
+(defun clerkenwell-set-namespace (ns)
+  "Evaluate this notebook's submissions in NS from now on."
+  (interactive (list (cider-read-from-minibuffer
+                      "Evaluate this notebook in namespace: "
+                      (or clerkenwell--namespace (cider-current-ns)))))
+  (let ((r (clerkenwell--eval-sync
+            (format "(clerkenwell.session/set-namespace! %s %s)"
+                    (clerkenwell--clj-string ns)
+                    (clerkenwell--clj-id)))))
+    (if (and r (clerkenwell--get r :ok?))
+        (progn (clerkenwell--note-namespace ns)
+               (clerkenwell--update-status)
+               (message "Clerkenwell: this notebook is evaluated in %s" ns))
+      (message "Clerkenwell: %s"
+               (or (and r (clerkenwell--get r :message)) "could not set the namespace")))))
+
 (defun clerkenwell-retry-delivery (result-id)
   "Resume delivery of RESULT-ID without evaluating again."
   (interactive (list (read-string "Result id: ")))
@@ -699,7 +828,9 @@ New ink that overlaps an entry already extends it; this applies the same
 rule to history recorded before it did.  Nothing is rewritten, and running
 it again does nothing."
   (interactive)
-  (let ((r (clerkenwell--eval-sync "(clerkenwell.session/regroup)")))
+  (let ((r (clerkenwell--eval-sync
+            (format "(clerkenwell.session/regroup %s)"
+                    (clerkenwell--clj-id)))))
     (if (and r (clerkenwell--get r :ok?))
         (let ((n (clerkenwell--get r :merged 0)))
           (setq clerkenwell--history-version nil)
@@ -750,7 +881,9 @@ initial entry, which is also what keeps results placed below it.  For a
 genuinely blank slate, start on a blank page."
   (interactive)
   (when (yes-or-no-p "Archive this notebook's Clerkenwell history? ")
-    (let ((r (clerkenwell--eval-sync "(clerkenwell.session/archive-notebook!)")))
+    (let ((r (clerkenwell--eval-sync
+              (format "(clerkenwell.session/archive-notebook! %s)"
+                      (clerkenwell--clj-id)))))
       (if (and r (clerkenwell--get r :ok?))
           (progn
             (setq clerkenwell--history-version nil)
@@ -767,45 +900,65 @@ genuinely blank slate, start on a blank page."
   (interactive)
   (clerkenwell--stop-polling)
   (clerkenwell--eval-sync "(clerkenwell.session/stop!)")
-  (setq clerkenwell--status "stopped")
-  (force-mode-line-update)
+  (setq clerkenwell--attached nil)
+  (dolist (b (clerkenwell--buffers))
+    (with-current-buffer b
+      (setq clerkenwell--status "stopped")
+      (force-mode-line-update)))
   (message "Clerkenwell: stopped"))
 
 ;;; ------------------------------------------------------------------
 ;;; Mode
 
 (defun clerkenwell--poll ()
-  "Refresh the buffer if history has grown.
-Skipped while an evaluation is outstanding, so a background refresh
-cannot interleave with a submission."
-  (when (and (buffer-live-p (current-buffer))
-             (not clerkenwell--in-flight))
-    (condition-case nil
-        (let* ((v (clerkenwell--eval-sync "(clerkenwell.session/history-version)"))
-               (version (and v (clerkenwell--get v :version)))
-               (held (and v (clerkenwell--get v :held?) t)))
-          (cond
-           ((and version (not (equal version clerkenwell--history-version)))
-            (setq clerkenwell--history-version version
-                  clerkenwell--held held)
-            (clerkenwell-refresh))
-           ;; Taking or losing the notebook changes no history, but the
-           ;; mode line says which it is.
-           ((and v (not (eq held clerkenwell--held)))
-            (setq clerkenwell--held held)
-            (clerkenwell--update-status))))
-      ;; A dead REPL or a stopped session must not spam errors from a timer.
-      (error nil))))
+  "Follow the tablet, and refresh the open notebook's buffer if its history
+has grown.  A notebook the tablet opens gets a buffer, shown where another
+notebook's was.  Skipped while an evaluation is outstanding, so a background
+refresh cannot interleave with a submission."
+  (let ((bufs (clerkenwell--buffers)))
+    (if (null bufs)
+        (clerkenwell--stop-polling)
+      (unless (seq-some (lambda (b) (buffer-local-value 'clerkenwell--in-flight b)) bufs)
+        (condition-case nil
+            (let* ((v (clerkenwell--eval-sync "(clerkenwell.session/history-version)"))
+                   (id (and v (clerkenwell--get v :notebook-id))))
+              (when (and v (clerkenwell--get v :ok?))
+                (let ((was clerkenwell--attached))
+                  (setq clerkenwell--attached id)
+                  (when id
+                    (let ((buf (clerkenwell--notebook-buffer id (clerkenwell--get v :name))))
+                      (unless (equal id was) (clerkenwell--follow buf))
+                      (with-current-buffer buf
+                        (clerkenwell--poll-buffer v))))
+                  ;; The others' history cannot grow, but the mode line says
+                  ;; that their notebook is no longer the one on the tablet.
+                  (unless (equal id was)
+                    (dolist (b (clerkenwell--buffers))
+                      (unless (equal id (buffer-local-value 'clerkenwell--notebook-id b))
+                        (with-current-buffer b (clerkenwell--update-status))))))))
+          ;; A dead REPL or a stopped session must not spam errors from a timer.
+          (error nil))))))
+
+(defun clerkenwell--poll-buffer (v)
+  "Bring this buffer up to date with V, the open notebook's history version."
+  (let ((version (clerkenwell--get v :version))
+        (held (and (clerkenwell--get v :held?) t)))
+    (cond
+     ((not (equal version clerkenwell--history-version))
+      (setq clerkenwell--history-version version
+            clerkenwell--held held)
+      (clerkenwell-refresh))
+     ;; Taking or losing the notebook changes no history, but the mode line
+     ;; says which it is.
+     ((not (eq held clerkenwell--held))
+      (setq clerkenwell--held held)
+      (clerkenwell--update-status)))))
 
 (defun clerkenwell--start-polling ()
   (clerkenwell--stop-polling)
-  (let ((buf (current-buffer)))
-    (setq clerkenwell--poll-timer
-          (run-with-timer clerkenwell-poll-interval clerkenwell-poll-interval
-                          (lambda ()
-                            (if (buffer-live-p buf)
-                                (with-current-buffer buf (clerkenwell--poll))
-                              (cancel-timer clerkenwell--poll-timer)))))))
+  (setq clerkenwell--poll-timer
+        (run-with-timer clerkenwell-poll-interval clerkenwell-poll-interval
+                        #'clerkenwell--poll)))
 
 (defun clerkenwell--stop-polling ()
   (when clerkenwell--poll-timer
@@ -823,6 +976,7 @@ cannot interleave with a submission."
     (define-key m (kbd "C-c C-r") #'clerkenwell-refresh)
     (define-key m (kbd "C-c C-q") #'clerkenwell-disconnect)
     (define-key m (kbd "C-c C-d") #'clerkenwell-check-device)
+    (define-key m (kbd "C-c C-n") #'clerkenwell-set-namespace)
     m)
   "Keymap for `clerkenwell-mode'.")
 
@@ -838,13 +992,10 @@ else and sends nothing."
   (if clerkenwell-mode
       (progn
         (add-hook 'after-change-functions #'clerkenwell--after-change nil t)
-        (add-hook 'kill-buffer-hook #'clerkenwell--stop-polling nil t)
         (add-hook 'window-size-change-functions #'clerkenwell--on-resize nil t)
         (unless clerkenwell--history-end
           (setq clerkenwell--history-end (copy-marker (point-max) nil))))
-    (clerkenwell--stop-polling)
     (remove-hook 'after-change-functions #'clerkenwell--after-change t)
-    (remove-hook 'kill-buffer-hook #'clerkenwell--stop-polling t)
     (remove-hook 'window-size-change-functions #'clerkenwell--on-resize t)))
 
 (provide 'clerkenwell)

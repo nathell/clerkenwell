@@ -151,6 +151,18 @@
       (publish! (io/file (events-dir nb) (str n ".edn")) (pr-str ev))
       ev)))
 
+(defn session-namespace
+  "The namespace the session's submissions are evaluated in, or nil for one
+   that has none yet: the last set with :namespace-set, or failing that the
+   last a result was evaluated in -- which is how a session first gets one."
+  [nb]
+  (some (fn [ev]
+          (case (:event ev)
+            :namespace-set (:namespace ev)
+            :result-created (get-in ev [:record :namespace])
+            nil))
+        (rseq (read-events nb))))
+
 ;; -------- manifest (derived) --------
 
 (defn replay

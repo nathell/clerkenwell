@@ -367,6 +367,59 @@
       (is (= {:queued 1} (:deliveries s)))
       (is (empty? (:uncertain s))))))
 
+;; -------- a notebook's identity --------
+
+(def other-doc "6a1f0c3e-7d2b-4c59-9e8a-0b4d2c7f1e93")
+
+(deftest a-notebook-remembers-its-namespace
+  (let [root (str (tmp-root))]
+    (create-ns 'ckw.elsewhere)
+    (start! {:state-root root :ssh-host "no-host" :port port})
+    (report-identity!)
+    (testing "a new one takes the namespace it is given"
+      (is (= "=> \"user\"" (:text (session/submit "(clojure.core/str clojure.core/*ns*)" "user")))))
+    (testing "after which that is the one it is evaluated in"
+      (is (= "=> \"user\"" (:text (session/submit "(clojure.core/str clojure.core/*ns*)" "ckw.elsewhere"))))
+      (is (= "user" (:namespace (session/history-version)))))
+    (testing "until it is changed"
+      (is (:ok? (session/set-namespace! "ckw.elsewhere" doc)))
+      (is (= "=> \"ckw.elsewhere\"" (:text (session/submit "(clojure.core/str clojure.core/*ns*)" "user"))))
+      (is (= "ckw.elsewhere" (:namespace (session/status)))))
+    (testing "only on the notebook the tablet has open"
+      (is (false? (:ok? (session/set-namespace! "user" other-doc)))))))
+
+(deftest a-submission-for-another-notebook-is-refused
+  (let [root (str (tmp-root))]
+    (start! {:state-root root :ssh-host "no-host" :port port})
+    (report-identity!)
+    (intern 'user 'ckw-identity-marker (atom 0))
+    (let [r (session/submit "(swap! user/ckw-identity-marker inc)" "user"
+                            {:notebook-id other-doc})]
+      (is (false? (:ok? r)))
+      (is (= :identity (:stage r)))
+      (is (zero? @@(resolve 'user/ckw-identity-marker))))))
+
+(deftest a-notebook-the-tablet-has-left-keeps-its-history
+  (let [root (str (tmp-root))]
+    (start! {:state-root root :ssh-host "no-host" :port port})
+    (report-identity!)
+    (is (:ok? (session/submit "(+ 1 2)" "user")))
+    (reset! transport/active-page {:doc other-doc :page page :instance "test"
+                                   :at (System/currentTimeMillis)})
+    (is (eventually #(= other-doc (:notebook-id (session/history-version)))))
+    (is (empty? (:entries (session/history))))
+    (is (= ["(+ 1 2)"] (map :source (:entries (session/history doc)))))
+    (is (pos? (:version (session/history-version doc))))))
+
+(deftest the-tablet-says-what-a-notebook-is-called
+  (let [xochitl (tmp-root)]
+    (spit (io/file xochitl (str doc ".metadata")) "{\"visibleName\": \"Fourier scratch\"}")
+    (start! {:state-root (str (tmp-root)) :ssh-host "no-host" :port port
+             :device {:local-root (str (tmp-root)) :xochitl-root (str xochitl)}})
+    (report-identity!)
+    (is (eventually #(= "Fourier scratch" (:name (session/history-version)))))
+    (is (= "Fourier scratch" (:name (session/status))))))
+
 ;; -------- the lease --------
 
 (defn- elsewhere
