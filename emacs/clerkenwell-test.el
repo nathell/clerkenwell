@@ -435,6 +435,18 @@ colours through the buffer's own font-lock."
     ;; parseedn reads false as nil.
     (should (null (gethash :strict-height? layout)))))
 
+(ert-deftest clerkenwell-test-font-defaults-to-emacs-font ()
+  (let ((clerkenwell-font "Fira Code"))
+    (should (equal "Fira Code" (clerkenwell--font))))
+  (let ((clerkenwell-font nil))
+    (cl-letf (((symbol-function 'face-attribute)
+               (lambda (&rest _) (font-spec :family "Menlo"))))
+      (should (equal "Menlo" (clerkenwell--font))))
+    ;; On a terminal the default face has no font.
+    (cl-letf (((symbol-function 'face-attribute)
+               (lambda (&rest _) 'unspecified)))
+      (should (equal "Monospaced" (clerkenwell--font))))))
+
 ;;; One buffer per notebook
 
 (defmacro clerkenwell-test--with-clean-buffers (&rest body)

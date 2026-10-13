@@ -92,12 +92,23 @@ screens down, and images are no longer shrunk to fit the room left."
 ;; with every submission, so a change takes effect with the next one.
 ;; Sizes are in page pixels: the page is 1404 wide and 1872 high.
 
-(defcustom clerkenwell-font "Inconsolata"
+(defcustom clerkenwell-font nil
   "Font results are written on the page in, and code within Markdown.
 An installed font family, or the name of a font file.  It should be
 monospace: values are pretty-printed to fit the page in columns, and
-monospace output is easy to tell from your handwriting."
-  :type 'string)
+monospace output is easy to tell from your handwriting.  When nil, the
+font of the default face is used, or, where Emacs has no font of its
+own, as on a terminal, Java's Monospaced, which every JVM has."
+  :type '(choice (const :tag "Emacs's own font" nil) string))
+
+(defun clerkenwell--font ()
+  "The font results are written in: see `clerkenwell-font'."
+  (or clerkenwell-font
+      (let ((font (face-attribute 'default :font)))
+        (and (fontp font)
+             (let ((family (font-get font :family)))
+               (and family (format "%s" family)))))
+      "Monospaced"))
 
 (defcustom clerkenwell-prose-font "Times New Roman"
   "Font Markdown and tables are typeset in on the page.
@@ -180,7 +191,7 @@ chart also waits for the JIT."
                   " :max-rows %d :max-columns %d :max-cell-chars %d}"
                   " :layout {:left-margin %d :top-margin %d :bottom-margin %d :gap %d"
                   " :strict-height? %s :scroll-limit %d}}")
-          (clerkenwell--clj-string clerkenwell-font)
+          (clerkenwell--clj-string (clerkenwell--font))
           (clerkenwell--clj-string clerkenwell-prose-font)
           clerkenwell-font-size
           clerkenwell-print-level clerkenwell-print-length clerkenwell-max-chars
