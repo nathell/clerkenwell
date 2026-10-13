@@ -428,6 +428,17 @@
           :truncated? (> (count printed) max-chars)
           :kindly-kind kindly-kind})))))
 
+(defn verbatim
+  "`text` as a presentation of itself, for putting on the page unevaluated:
+   drawn as it is, with no `=>`, cut to `max-chars` like any other text."
+  [text max-chars]
+  (let [t (cap text max-chars)]
+    {:kind :text
+     :verbatim? true
+     :text t
+     :tablet-text t
+     :truncated? (> (count text) max-chars)}))
+
 ;; -------- rasterization --------
 
 ;; Wrapping and trimming follow what ImageMagick's `caption:` + `-trim` did

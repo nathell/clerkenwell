@@ -367,6 +367,19 @@ separator, header and all."
        "{:entries [{:kind :computation :source \"(t)\" :text \"| a |\\n|---|\\n| 1 |\" :presentation {:kind :table :text \"| a |\\n|---|\\n| 1 |\"} :delivery :inserted}]}"))
      (should (string-match-p "^(t)\n| a |\n|---|\n| 1 |$" (clerkenwell-test--buffer-text))))))
 
+(ert-deftest clerkenwell-test-verbatim-text ()
+  "Text sent as it is has no source, and is shown as written."
+  (clerkenwell-test--with-buffer
+   (let ((clerkenwell-quiet t))
+     (clerkenwell--rebuild-history
+      (clerkenwell-test--entries
+       "{:entries [{:kind :computation :source nil :text \"note\\n  this\" :presentation {:kind :text :verbatim? true :text \"note\\n  this\"} :delivery :inserted}]}"))
+     (should (string-match-p "^note\n  this$" (clerkenwell-test--buffer-text))))))
+
+(ert-deftest clerkenwell-test-send-text-needs-a-connection ()
+  (let ((clerkenwell--repl nil))
+    (should-error (clerkenwell-send-text "hello") :type 'user-error)))
+
 (ert-deftest clerkenwell-test-faces-survive-font-lock ()
   "A warning keeps its face when font-lock refontifies the history.
 Text in Clojure's comment syntax (a `;' note) still takes the comment

@@ -169,6 +169,29 @@
       (is (= :hidden (get-in e [:presentation :kind])))
       (is (= :skipped (:delivery e))))))
 
+(deftest text-goes-on-the-page-unevaluated
+  (let [root (str (tmp-root))
+        nb (store/notebook-dir root doc)]
+    (start! {:state-root root :ssh-host "no-host" :port port})
+    (report-identity!)
+    (testing "it needs a page, as a submission does"
+      (reset! transport/active-page nil)
+      (is (= :identity (:stage (session/send-text "hello"))))
+      (report-identity!))
+    (with-redefs [transport/push-asset! (fn [& _])]
+      (let [r (session/send-text "(System/exit 1)\n  as it is" {:notebook-id doc})]
+        (is (:ok? r) (pr-str (dissoc r :record)))
+        (is (= :queued (:delivery r)))
+        (is (= "(System/exit 1)\n  as it is" (get-in r [:presentation :tablet-text]))
+            "drawn as written, without =>")
+        (is (some? (get-in (store/read-manifest nb) [(:result-id r) :placement])))))
+    (testing "nothing is sent when there is nothing to send"
+      (is (= :read (:stage (session/send-text "  \n")))))
+    (let [e (last (:entries (session/history)))]
+      (is (= :computation (:kind e)))
+      (is (nil? (:source e)))
+      (is (true? (get-in e [:presentation :verbatim?]))))))
+
 (deftest image-results-reach-history-with-their-file
   (let [root (str (tmp-root))]
     (start! {:state-root root :ssh-host "no-host" :port port})

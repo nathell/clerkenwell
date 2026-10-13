@@ -505,7 +505,8 @@ the page."
       ("computation"
        (let ((src (clerkenwell--get entry :source))
              (delivery (clerkenwell--get entry :delivery)))
-         (insert src "\n")
+         ;; Text sent as it is has no source.
+         (when src (insert src "\n"))
          (clerkenwell--render-presentation entry)
          ;; Delivery is mutable and shown separately from the immutable
          ;; source/result above it. Quiet mode omits it only when there is
@@ -557,6 +558,9 @@ presentation carries as a fallback."
          ;; Sessions older than presentations report only :text.
          (text (or (clerkenwell--get pres :text) (clerkenwell--get entry :text))))
     (pcase (clerkenwell--name (clerkenwell--get pres :kind))
+      ((guard (clerkenwell--get pres :verbatim?))
+       ;; Sent as it is: plain text, as on the page.
+       (insert (format "%s" text)))
       ("hidden"
        (insert (propertize ";; value hidden" 'font-lock-face 'font-lock-comment-face)))
       ("md"
@@ -908,6 +912,42 @@ customised that variable the other way)."
                     (clerkenwell--get result :stage)
                     (or (clerkenwell--get result :message)
                         (clerkenwell--get result :reason)))))))))))
+
+;;;###autoload
+(defun clerkenwell-send-text (text)
+  "Put TEXT on the tablet's page as it is, evaluating nothing.
+Interactively, the region if it is active, or else text read from the
+minibuffer.  Works from any buffer while the tablet is connected; TEXT
+goes to whichever notebook the tablet has open, and is recorded in its
+history like a result."
+  (interactive
+   (list (if (use-region-p)
+             (buffer-substring-no-properties (region-beginning) (region-end))
+           (read-string "Send to the tablet: "))))
+  (unless clerkenwell--repl
+    (user-error "Clerkenwell: not connected; run `clerkenwell-open' first"))
+  (when (use-region-p) (deactivate-mark))
+  (if (string-blank-p text)
+      (message "Clerkenwell: nothing to send")
+    (clerkenwell--eval-async
+     (format "(clerkenwell.session/send-text %s {:settings %s})"
+             (clerkenwell--clj-string text)
+             (clerkenwell--settings))
+     (lambda (result err)
+       (cond
+        (err (message "Clerkenwell: %s" err))
+        ((null result)
+         (message "Clerkenwell: no result (is clerkenwell.session on the classpath?)"))
+        ((clerkenwell--get result :ok?)
+         (message "Clerkenwell: sent")
+         (when-let ((buf (clerkenwell--buffer-for
+                          (clerkenwell--get result :notebook-id))))
+           (with-current-buffer buf (clerkenwell-refresh))))
+        (t
+         (message "Clerkenwell [%s]: %s"
+                  (clerkenwell--name (clerkenwell--get result :stage))
+                  (or (clerkenwell--get result :message)
+                      (clerkenwell--get result :reason)))))))))
 
 (defun clerkenwell-set-namespace (ns)
   "Evaluate this notebook's submissions in NS from now on."

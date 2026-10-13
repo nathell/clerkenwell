@@ -85,6 +85,76 @@
       (-> presentation (dissoc :png-bytes) (assoc :image rel)))
     presentation))
 
+(defn- commit!
+  "Persist `presentation` as result `result-id`, then draw it, place it and
+   queue it for delivery. The bounded text is persisted before rasterization,
+   so a rasterization failure can be retried from stored text."
+  [{:keys [state-root notebook-id page-id source namespace
+           ink-bottom outputs-bottom config style]}
+   result-id presentation]
+  (let [nb (store/notebook-dir state-root notebook-id)
+        cfg (merge placement/default-config config)
+        style (merge html/default-style style)
+        usable-w (- (:page-width cfg) (* 2 (:left-margin cfg)))
+        record! (fn [presentation]
+                  (store/create-result!
+                   nb {:result-id result-id :notebook-id notebook-id :page-id page-id
+                       :source source :namespace (some-> namespace str)
+                       :presentation presentation :asset nil}))]
+    (cond
+      (:failed? presentation)
+      ;; Retain source and failure status; do not claim a committed
+      ;; result and do not re-evaluate.
+      (do (record! presentation)
+          (store/set-delivery! nb result-id :failed (name (:reason presentation)))
+          {:ok? false :stage :present :result-id result-id
+           :reason (:reason presentation)})
+
+      ;; A hidden value submitted without its source: nothing goes on
+      ;; the page, but the computation is still recorded.
+      (and (= :hidden (:kind presentation))
+           (nil? (:tablet-text presentation)))
+      (let [record (record! presentation)]
+        (store/set-delivery! nb result-id :skipped "hidden")
+        {:ok? true :result-id result-id :record record
+         :presentation presentation :delivery :skipped})
+
+      :else
+      ;; Persist the bounded text BEFORE rasterizing.
+      (let [presentation (persist-image! nb result-id presentation)
+            record (record! presentation)
+            tmp (io/file (System/getProperty "java.io.tmpdir")
+                         (str "ckw-" result-id ".png"))
+            top (placement/output-top ink-bottom outputs-bottom cfg)
+            raster (render/rasterize presentation tmp
+                                     {:base-dir nb
+                                      :font (:font style)
+                                      :font-size (:font-size style)
+                                      :prose-font (:prose-font style)
+                                      :max-width usable-w
+                                      :max-height (- (placement/max-bottom cfg)
+                                                     top)})]
+        (if-not (:ok? raster)
+          (do (store/set-delivery! nb result-id :failed "insufficient-space")
+              {:ok? false :stage :render :result-id result-id
+               :reason (:reason raster) :record record})
+          (let [asset (store/attach-asset! nb result-id raster)
+                spot (placement/place {:ink-bottom ink-bottom
+                                       :outputs-bottom outputs-bottom
+                                       :width (:width raster)
+                                       :height (:height raster)
+                                       :config cfg})]
+            (.delete tmp)
+            (if-not (:ok? spot)
+              (do (store/set-delivery! nb result-id :failed "insufficient-space")
+                  {:ok? false :stage :place :result-id result-id
+                   :reason (:reason spot) :record record})
+              (do (store/record-placement! nb result-id spot)
+                  (store/set-delivery! nb result-id :queued)
+                  {:ok? true :result-id result-id :record record
+                   :asset asset :placement spot
+                   :presentation presentation}))))))))
+
 (defn submit!
   "Capture, evaluate once, present, persist and queue for delivery.
 
@@ -92,10 +162,8 @@
    is still attributable. The bounded text is persisted before rasterization, so
    a rasterization failure can be retried from stored text without re-evaluating
    anything."
-  [{:keys [state-root notebook-id page-id source namespace
-           ink-bottom outputs-bottom limits config style include-source?]}]
+  [{:keys [source namespace limits config style include-source?] :as opts}]
   (let [ns-sym (symbol (str namespace))
-        nb (store/notebook-dir state-root notebook-id)
         parsed (read-single-form source ns-sym)]
     (if (:error parsed)
       {:ok? false :stage :read :reason (:error parsed) :message (:message parsed)}
@@ -113,79 +181,26 @@
           :value
           (let [cfg (merge placement/default-config config)
                 style (merge html/default-style style)
-                usable-w (- (:page-width cfg) (* 2 (:left-margin cfg)))
-                presentation (render/present
-                              (:value ev)
-                              (cond-> (merge render/default-limits
-                                             {:form (:ok parsed)
-                                              :chart-width usable-w
-                                              :right-margin (render/columns
-                                                             usable-w
-                                                             (:font style)
-                                                             (:font-size style))}
-                                             limits)
-                                include-source? (assoc :source source)))]
-            (cond
-              (:failed? presentation)
-              ;; Retain source and failure status; do not claim a committed
-              ;; result and do not re-evaluate.
-              (do (store/create-result!
-                   nb {:result-id result-id :notebook-id notebook-id :page-id page-id
-                       :source source :namespace (str namespace)
-                       :presentation presentation :asset nil})
-                  (store/set-delivery! nb result-id :failed (name (:reason presentation)))
-                  {:ok? false :stage :present :result-id result-id
-                   :reason (:reason presentation)})
+                usable-w (- (:page-width cfg) (* 2 (:left-margin cfg)))]
+            (commit! opts result-id
+                     (render/present
+                      (:value ev)
+                      (cond-> (merge render/default-limits
+                                     {:form (:ok parsed)
+                                      :chart-width usable-w
+                                      :right-margin (render/columns
+                                                     usable-w
+                                                     (:font style)
+                                                     (:font-size style))}
+                                     limits)
+                        include-source? (assoc :source source))))))))))
 
-              ;; A hidden value submitted without its source: nothing goes on
-              ;; the page, but the computation is still recorded.
-              (and (= :hidden (:kind presentation))
-                   (nil? (:tablet-text presentation)))
-              (let [record (store/create-result!
-                            nb {:result-id result-id :notebook-id notebook-id
-                                :page-id page-id :source source
-                                :namespace (str namespace)
-                                :presentation presentation :asset nil})]
-                (store/set-delivery! nb result-id :skipped "hidden")
-                {:ok? true :result-id result-id :record record
-                 :presentation presentation :delivery :skipped})
-
-              :else
-              ;; Persist the bounded text BEFORE rasterizing.
-              (let [presentation (persist-image! nb result-id presentation)
-                    record (store/create-result!
-                            nb {:result-id result-id :notebook-id notebook-id
-                                :page-id page-id :source source
-                                :namespace (str namespace)
-                                :presentation presentation :asset nil})
-                    tmp (io/file (System/getProperty "java.io.tmpdir")
-                                 (str "ckw-" result-id ".png"))
-                    top (placement/output-top ink-bottom outputs-bottom cfg)
-                    raster (render/rasterize presentation tmp
-                                             {:base-dir nb
-                                              :font (:font style)
-                                              :font-size (:font-size style)
-                                              :prose-font (:prose-font style)
-                                              :max-width usable-w
-                                              :max-height (- (placement/max-bottom cfg)
-                                                             top)})]
-                (if-not (:ok? raster)
-                  (do (store/set-delivery! nb result-id :failed "insufficient-space")
-                      {:ok? false :stage :render :result-id result-id
-                       :reason (:reason raster) :record record})
-                  (let [asset (store/attach-asset! nb result-id raster)
-                        spot (placement/place {:ink-bottom ink-bottom
-                                               :outputs-bottom outputs-bottom
-                                               :width (:width raster)
-                                               :height (:height raster)
-                                               :config cfg})]
-                    (.delete tmp)
-                    (if-not (:ok? spot)
-                      (do (store/set-delivery! nb result-id :failed "insufficient-space")
-                          {:ok? false :stage :place :result-id result-id
-                           :reason (:reason spot) :record record})
-                      (do (store/record-placement! nb result-id spot)
-                          (store/set-delivery! nb result-id :queued)
-                          {:ok? true :result-id result-id :record record
-                           :asset asset :placement spot
-                           :presentation presentation}))))))))))))
+(defn send-text!
+  "Put `text` on the page as it is, evaluating nothing: persisted, drawn,
+   placed and queued for delivery exactly as a result is. The record has no
+   source or namespace, since nothing was read."
+  [{:keys [text limits] :as opts}]
+  (if (clojure.string/blank? text)
+    {:ok? false :stage :read :reason :empty :message "nothing to send"}
+    (commit! (dissoc opts :source :namespace) (str (random-uuid))
+             (render/verbatim text (:max-chars (merge render/default-limits limits))))))

@@ -446,6 +446,70 @@
   (or (store/session-namespace (store/notebook-dir (:state-root s) notebook-id))
       default))
 
+(defn- commit-to-page
+  "Check that the tablet has a page open that this connection may write --
+   the notebook `opts` names, when it names one -- and call `f` with the
+   session, the notebook's id and what `core` needs to know of the page.
+   What `f` commits is then delivered in the background.
+
+   One at a time, and every check is made before `f` runs: when one fails,
+   nothing has happened, so trying again is safe."
+  [opts f]
+  (let [s @connection]
+    (cond
+      (nil? s)
+      {:ok? false :stage :connection :message "not connected; call start! first"}
+
+      (not (compare-and-set! evaluating false true))
+      {:ok? false :stage :connection :message "an evaluation is already in flight"}
+
+      :else
+      (try
+        (let [live (active)]
+          (cond
+            (nil? live)
+            {:ok? false :stage :identity
+             :message "the device has not reported a page recently; is the tunnel up?"}
+
+            (and (:notebook-id opts) (not= (:notebook-id opts) (:doc live)))
+            {:ok? false :stage :identity
+             :message "this notebook is not the one open on the tablet"}
+
+            (do (ensure-watching! live)
+                (not (writable? (:doc live))))
+            {:ok? false :stage :lease :message (unwritable-message)}
+
+            :else
+            (let [{:keys [doc page]} live
+                  nb (store/notebook-dir (:state-root s) doc)
+                  prev-bottom (->> (vals (store/read-manifest nb))
+                                   (filter #(= page (:page-id %)))
+                                   (keep #(get-in % [:placement :bottom]))
+                                   (reduce max 0))
+                  r (f s doc {:state-root (:state-root s)
+                              :notebook-id doc
+                              :page-id page
+                              :ink-bottom (ink/ink-bottom nb page)
+                              :outputs-bottom (when (pos? prev-bottom) prev-bottom)
+                              :style (get-in opts [:settings :style])
+                              :limits (get-in opts [:settings :limits])
+                              :config (get-in opts [:settings :layout])})]
+              (if-not (:ok? r)
+                r
+                ;; Committed. Delivery happens in the background: a transfer
+                ;; failure is never a reason to evaluate again, and waiting on
+                ;; SSH would block the editor.
+                (do
+                  ;; A hidden value without its source has nothing to send.
+                  (when-not (= :skipped (:delivery r))
+                    (deliver-async! nb (:result-id r) (:ssh-host s)))
+                  (assoc r
+                         :text (get-in r [:presentation :text])
+                         :page-id page
+                         :notebook-id doc
+                         :delivery (or (:delivery r) :queued)))))))
+        (finally (reset! evaluating false))))))
+
 (defn submit
   "Evaluate `source` once in the notebook's namespace and commit the result to
    the page the device currently shows. A notebook remembers the namespace its
@@ -469,71 +533,25 @@
    effect with the next."
   ([source ns-name] (submit source ns-name nil))
   ([source ns-name opts]
-    (let [s @connection]
-     (cond
-       (nil? s)
-       {:ok? false :stage :connection :message "not connected; call start! first"}
+   (commit-to-page
+    opts
+    (fn [s doc page]
+      (let [ns-name (namespace-for s doc ns-name)]
+        (if (nil? (find-ns (symbol ns-name)))
+          {:ok? false :stage :namespace
+           :message (str "namespace not loaded in this REPL: " ns-name)}
+          (core/submit! (assoc page
+                               :source source
+                               :namespace ns-name
+                               :include-source? (boolean (:include-source? opts))))))))))
 
-       (not (compare-and-set! evaluating false true))
-       {:ok? false :stage :connection :message "an evaluation is already in flight"}
-
-       :else
-       (try
-         (let [live (active)]
-           (cond
-             (nil? live)
-             {:ok? false :stage :identity
-              :message "the device has not reported a page recently; is the tunnel up?"}
-
-             (and (:notebook-id opts) (not= (:notebook-id opts) (:doc live)))
-             {:ok? false :stage :identity
-              :message "this notebook is not the one open on the tablet"}
-
-             (do (ensure-watching! live)
-                 (not (writable? (:doc live))))
-             ;; Checked before evaluating: nothing has happened yet, so
-             ;; submitting again is safe.
-             {:ok? false :stage :lease :message (unwritable-message)}
-
-             (nil? (find-ns (symbol (namespace-for s (:doc live) ns-name))))
-             {:ok? false :stage :namespace
-              :message (str "namespace not loaded in this REPL: "
-                            (namespace-for s (:doc live) ns-name))}
-
-             :else
-             (let [{:keys [doc page]} live
-                   nb (store/notebook-dir (:state-root s) doc)
-                   ns-name (namespace-for s doc ns-name)
-                   prev-bottom (->> (vals (store/read-manifest nb))
-                                    (filter #(= page (:page-id %)))
-                                    (keep #(get-in % [:placement :bottom]))
-                                    (reduce max 0))
-                   r (core/submit! {:state-root (:state-root s)
-                                    :notebook-id doc
-                                    :page-id page
-                                    :source source
-                                    :namespace ns-name
-                                    :ink-bottom (ink/ink-bottom nb page)
-                                    :outputs-bottom (when (pos? prev-bottom) prev-bottom)
-                                    :include-source? (boolean (:include-source? opts))
-                                    :style (get-in opts [:settings :style])
-                                    :limits (get-in opts [:settings :limits])
-                                    :config (get-in opts [:settings :layout])})]
-               (if-not (:ok? r)
-                 r
-                 ;; Evaluation is done and captured. Delivery happens in the
-                 ;; background: a transfer failure is never a reason to evaluate
-                 ;; again, and waiting on SSH would block the editor.
-                 (do
-                   ;; A hidden value without its source has nothing to send.
-                   (when-not (= :skipped (:delivery r))
-                     (deliver-async! nb (:result-id r) (:ssh-host s)))
-                   (assoc r
-                          :text (get-in r [:presentation :text])
-                          :page-id page
-                          :notebook-id doc
-                          :delivery (or (:delivery r) :queued)))))))
-         (finally (reset! evaluating false)))))))
+(defn send-text
+  "Put `text` on the page the device currently shows, as it is, evaluating
+   nothing. It is recorded in the notebook's history like a result. `opts`
+   are as for `submit`, less `:include-source?`: there is no source."
+  ([text] (send-text text nil))
+  ([text opts]
+   (commit-to-page opts (fn [_ _ page] (core/send-text! (assoc page :text text))))))
 
 ;; -------- delivery, without evaluating again --------
 
