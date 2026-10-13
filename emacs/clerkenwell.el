@@ -913,17 +913,45 @@ customised that variable the other way)."
                     (or (clerkenwell--get result :message)
                         (clerkenwell--get result :reason)))))))))))
 
+(defun clerkenwell--dedent (text &optional column)
+  "TEXT with the indentation its lines share removed, and tabs expanded.
+COLUMN is where TEXT's first line starts, as when it is cut from the
+middle of a line: the lines after it are indented relative to that."
+  (let ((width tab-width))
+    (with-temp-buffer
+      (setq tab-width width)
+      (insert (make-string (or column 0) ?\s) text)
+      (untabify (point-min) (point-max))
+      (let ((indent nil))
+        (goto-char (point-min))
+        (while (not (eobp))
+          (unless (looking-at-p " *$")
+            (setq indent (min (or indent most-positive-fixnum)
+                              (current-indentation))))
+          (forward-line 1))
+        (goto-char (point-min))
+        (while (not (eobp))
+          (delete-region (point) (progn (skip-chars-forward " " (+ (point) (or indent 0)))
+                                        (point)))
+          (forward-line 1)))
+      (buffer-string))))
+
 ;;;###autoload
 (defun clerkenwell-send-text (text)
   "Put TEXT on the tablet's page as it is, evaluating nothing.
 Interactively, the region if it is active, or else text read from the
-minibuffer.  Works from any buffer while the tablet is connected; TEXT
-goes to whichever notebook the tablet has open, and is recorded in its
-history like a result."
+minibuffer.  Indentation the lines share is removed, counting the
+region's first line from the column it starts in, so a form selected
+from within a line keeps its own indentation.  Works from any buffer
+while the tablet is connected; TEXT goes to whichever notebook the
+tablet has open, and is recorded in its history like a result."
   (interactive
-   (list (if (use-region-p)
-             (buffer-substring-no-properties (region-beginning) (region-end))
-           (read-string "Send to the tablet: "))))
+   (list (clerkenwell--dedent
+          (if (use-region-p)
+              (buffer-substring-no-properties (region-beginning) (region-end))
+            (read-string "Send to the tablet: "))
+          (when (use-region-p)
+            (save-excursion (goto-char (region-beginning)) (current-column))))))
   (unless clerkenwell--repl
     (user-error "Clerkenwell: not connected; run `clerkenwell-open' first"))
   (when (use-region-p) (deactivate-mark))

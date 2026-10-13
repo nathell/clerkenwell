@@ -376,6 +376,16 @@ separator, header and all."
        "{:entries [{:kind :computation :source nil :text \"note\\n  this\" :presentation {:kind :text :verbatim? true :text \"note\\n  this\"} :delivery :inserted}]}"))
      (should (string-match-p "^note\n  this$" (clerkenwell-test--buffer-text))))))
 
+(ert-deftest clerkenwell-test-dedent ()
+  ;; A map selected from within a call, starting at column 24.
+  (should (equal "{:foo foo\n :bar bar}"
+                 (clerkenwell--dedent "{:foo foo\n                         :bar bar}" 24)))
+  (should (equal "a\n  b\n\nc"
+                 (clerkenwell--dedent "    a\n      b\n\n    c")))
+  (let ((tab-width 8))
+    (should (equal "a\n b" (clerkenwell--dedent "\ta\n         b"))))
+  (should (equal "as is" (clerkenwell--dedent "as is"))))
+
 (ert-deftest clerkenwell-test-send-text-needs-a-connection ()
   (let ((clerkenwell--repl nil))
     (should-error (clerkenwell-send-text "hello") :type 'user-error)))
