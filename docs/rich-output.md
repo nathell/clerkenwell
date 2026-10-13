@@ -150,9 +150,10 @@ At most 30 rows and 12 columns are shown, each cell capped at 40 characters,
 with what was left out said beneath ("… 70 more rows"). A column of numbers
 aligns right. Headings drop a plain keyword's colon.
 
-On the page, tables are set in Times New Roman, a proportional face whose
-digits are all one width, so numbers still line up. A table too wide for the
-page is set smaller, down to 28px from 40px; one still too wide wraps its
+On the page, tables are set in the prose font, Times New Roman by default
+(`clerkenwell-prose-font`), a proportional face whose digits are all one
+width, so numbers still line up. A table too wide for the page is set
+smaller, down to seven tenths of the font size; one still too wide wraps its
 cells between words; only if even that cannot fit is the drawing scaled down.
 Like text, a table too tall for the room left is refused, not squeezed. Emacs
 shows the same rows and columns as an Org-style text table.
@@ -162,8 +163,9 @@ shows the same rows and columns as an Org-style text table.
 `kind/md` takes a string, or a sequence of strings as lines, bounded like
 text. nextjournal/markdown (commonmark-java underneath, with GFM tables,
 strikethrough, task lists, footnotes and autolinks) parses it into hiccup,
-which Clerkenwell serialises as XHTML. Body text is set in Times New Roman,
-code in Inconsolata; code blocks wrap rather than being cut off at the edge.
+which Clerkenwell serialises as XHTML. Body text is set in the prose font,
+code in the output font (Times New Roman and Inconsolata by default); code
+blocks wrap rather than being cut off at the edge.
 
 Nothing is fetched while drawing: an image is shown as its alt text in
 brackets. Raw HTML is shown as the text it was written as, formulas as their

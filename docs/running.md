@@ -32,8 +32,9 @@ than in your CIDER session.
 - A JVM on the host, and the Inconsolata font installed. Output is drawn in a
   monospace face so that on the page it is immediately distinguishable from your
   own writing. Images are drawn with Java2D, so no external image tool is
-  needed. To use a font that is not installed, set
-  `clerkenwell.render/default-font` to the path of a `.ttf` file.
+  needed. To use another font, or one that is not installed, set
+  `clerkenwell-font` to its family or the path of a `.ttf` file (see
+  *Configuration* below).
 
 ## 1. Install the adapter on the device
 
@@ -174,6 +175,25 @@ which the device rejects.
 
 If the status shows `no page`, the host is not hearing from the adapter: check
 the tunnel first, then that Xochitl is running with the adapter installed.
+
+### Configuration
+
+Everything about how Clerkenwell looks and behaves is set from Emacs:
+`M-x customize-group RET clerkenwell`. Besides the connection and how the
+buffer shows history, that covers:
+
+- **Fonts:** `clerkenwell-font` (results, and code in Markdown; monospace),
+  `clerkenwell-prose-font` (Markdown and tables) and `clerkenwell-font-size`.
+- **Layout on the page:** the margins, the gap between a result and what is
+  above it, and how far a result may reach when `clerkenwell-strict-height` is
+  off.
+- **Limits:** print level and length, how much output is kept, how long
+  printing and drawing charts may take, and how much of a table is shown.
+- **Handwriting in the buffer:** colours, stroke width, resolution and scale.
+
+Settings for the page are sent with every submission, so a change applies to
+the next one. Handwriting is redrawn with `M-x clerkenwell-redraw`. Sizes on
+the page are in page pixels; the page is 1404 by 1872.
 
 ## 3b. Run the development driver
 

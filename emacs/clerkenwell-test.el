@@ -416,6 +416,25 @@ colours through the buffer's own font-lock."
                           (clerkenwell--copy-description
                            (parseedn-read-str "{:ok? false :message \"asleep\"}")))))
 
+;;; Settings
+
+(ert-deftest clerkenwell-test-settings-are-sent-as-edn ()
+  (let* ((clerkenwell-font "Fira \"Code\"")
+         (clerkenwell-font-size 32)
+         (clerkenwell-print-timeout 1.5)
+         (clerkenwell-strict-height nil)
+         (m (parseedn-read-str (clerkenwell--settings)))
+         (style (gethash :style m))
+         (limits (gethash :limits m))
+         (layout (gethash :layout m)))
+    (should (equal "Fira \"Code\"" (gethash :font style)))
+    (should (equal 32 (gethash :font-size style)))
+    (should (equal 1500 (gethash :timeout-ms limits)))
+    (should (equal 30 (gethash :max-rows limits)))
+    (should (equal 60 (gethash :left-margin layout)))
+    ;; parseedn reads false as nil.
+    (should (null (gethash :strict-height? layout)))))
+
 ;;; One buffer per notebook
 
 (defmacro clerkenwell-test--with-clean-buffers (&rest body)

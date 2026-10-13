@@ -122,3 +122,14 @@
         (is (false? (:ok? r)))
         (is (= :insufficient-space (:reason r)))))
     (.delete out)))
+
+(deftest set-as-configured
+  (testing "in the size asked for"
+    (let [t (table/table-data people)
+          small (table/image t 1284 {:font-size 30})
+          large (table/image t 1284 {:font-size 60})]
+      (is (> (.getHeight large) (.getHeight small)))))
+  (testing "showing as many rows as asked for"
+    (let [p (render/present (kind/table (map #(hash-map :n %) (range 10)))
+                            (assoc render/default-limits :max-rows 3))]
+      (is (= 3 (count (:rows p)))))))

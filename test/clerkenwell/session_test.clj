@@ -182,19 +182,30 @@
       (is (.isAbsolute (io/file (:image e))))
       (is (= 1284 (:page-width e)) "as wide as the page allows, not the stored 1404"))))
 
-(deftest strict-height-reaches-placement
+(deftest settings-reach-presentation-and-placement
   (let [root (str (tmp-root))
-        seen (atom [])]
+        seen (atom [])
+        settings {:style {:font-size 32}
+                  :limits {:print-length 5}
+                  :layout {:strict-height? false :left-margin 100}}]
     (start! {:state-root root :ssh-host "no-host" :port port})
     (report-identity!)
     (with-redefs [transport/push-asset! (fn [& _])
                   clerkenwell.core/submit! (let [orig clerkenwell.core/submit!]
-                                             (fn [args] (swap! seen conj (:config args)) (orig args)))]
-      (session/submit "1" "user" {:strict-height? false})
-      (session/submit "2" "user" {:strict-height? true})
-      (session/submit "3" "user"))
-    (is (= [{:strict-height? false} {:strict-height? true} nil] @seen)
-        "passed on when given; otherwise placement's default stands")))
+                                             (fn [args]
+                                               (swap! seen conj (select-keys args [:style :limits :config]))
+                                               (orig args)))]
+      (session/submit "1" "user" {:settings settings})
+      (session/submit "2" "user"))
+    (is (= [{:style {:font-size 32} :limits {:print-length 5}
+             :config {:strict-height? false :left-margin 100}}
+            {:style nil :limits nil :config nil}]
+           @seen)
+        "passed on when given; otherwise the defaults stand")
+    (testing "and they are applied"
+      (let [r (session/submit "(range 100)" "user" {:settings settings})]
+        (is (= "=> (0 1 2 3 4 ...)" (:text r)))
+        (is (= 100 (get-in r [:placement :dx])))))))
 
 (deftest history-interleaves-ink-and-computation
   (let [root (str (tmp-root))

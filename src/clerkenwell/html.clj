@@ -10,6 +10,14 @@
            (com.openhtmltopdf.util XRLog)
            (java.awt.image BufferedImage)))
 
+(def default-style
+  "How output is set on the page: :font for printed values and code, which
+   should be monospace; :prose-font for Markdown and tables; :font-size, in
+   page pixels, for both. A font is an installed family or a font file."
+  {:font "Inconsolata"
+   :prose-font "Times New Roman"
+   :font-size 40})
+
 ;; It logs every stage of every render at INFO, which would flood the REPL.
 ;; This is global to the JVM; nothing else in a notebook is likely to be
 ;; using openhtmltopdf.

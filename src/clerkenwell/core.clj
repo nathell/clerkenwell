@@ -6,6 +6,7 @@
    evaluation -- not a timeout, not a rendering failure, not a transfer retry.
    Resubmission is an explicit user act that creates a new computation id."
   (:require [clojure.java.io :as io]
+            [clerkenwell.html :as html]
             [clerkenwell.placement :as placement]
             [clerkenwell.render :as render]
             [clerkenwell.store :as store])
@@ -92,7 +93,7 @@
    a rasterization failure can be retried from stored text without re-evaluating
    anything."
   [{:keys [state-root notebook-id page-id source namespace
-           ink-bottom outputs-bottom limits config include-source?]}]
+           ink-bottom outputs-bottom limits config style include-source?]}]
   (let [ns-sym (symbol (str namespace))
         nb (store/notebook-dir state-root notebook-id)
         parsed (read-single-form source ns-sym)]
@@ -111,6 +112,7 @@
 
           :value
           (let [cfg (merge placement/default-config config)
+                style (merge html/default-style style)
                 usable-w (- (:page-width cfg) (* 2 (:left-margin cfg)))
                 presentation (render/present
                               (:value ev)
@@ -119,8 +121,8 @@
                                               :chart-width usable-w
                                               :right-margin (render/columns
                                                              usable-w
-                                                             render/default-font
-                                                             render/default-font-size)}
+                                                             (:font style)
+                                                             (:font-size style))}
                                              limits)
                                 include-source? (assoc :source source)))]
             (cond
@@ -161,6 +163,9 @@
                     top (placement/output-top ink-bottom outputs-bottom cfg)
                     raster (render/rasterize presentation tmp
                                              {:base-dir nb
+                                              :font (:font style)
+                                              :font-size (:font-size style)
+                                              :prose-font (:prose-font style)
                                               :max-width usable-w
                                               :max-height (- (placement/max-bottom cfg)
                                                              top)})]

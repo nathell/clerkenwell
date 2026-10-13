@@ -29,12 +29,10 @@
   [src]
   (html/xhtml (md/->hiccup renderers src)))
 
-(def font-family "Times New Roman")
-(def code-family "Inconsolata")
-(def font-size 40)
-
-(def css
-  (str "body { font-family: '" font-family "', serif; font-size: " font-size "px;"
+(defn css
+  "The style sheet for `style`, as in `html/default-style`."
+  [{:keys [font prose-font font-size]}]
+  (str "body { font-family: '" prose-font "', serif; font-size: " font-size "px;"
        " line-height: 1.25; word-wrap: break-word; }"
        "body > div > *:first-child { margin-top: 0; }"
        "p, ul, ol, blockquote, pre, table { margin: 0 0 0.5em 0; }"
@@ -44,7 +42,7 @@
        "ul, ol { padding-left: 1.2em; }"
        ;; The [x] or [ ] is the marker.
        "ul.contains-task-list { list-style: none; padding-left: 0; }"
-       "code { font-family: '" code-family "', monospace; font-size: 0.9em; }"
+       "code { font-family: '" font "', monospace; font-size: 0.9em; }"
        ;; A long line of code wraps rather than being cut off at the edge.
        "pre { white-space: pre-wrap; }"
        "blockquote { padding-left: 0.6em; border-left: 3px solid black; }"
@@ -56,8 +54,11 @@
        "th { border-bottom: 2px solid black; }"))
 
 (defn image
-  "Markdown `src` typeset `max-width` pixels wide, trimmed to what is drawn.
-   Text wraps to the width, so only its height can be too much."
-  ^BufferedImage [src max-width]
-  (let [img (html/render (html/document max-width css (->xhtml src)))]
-    (image/trim (image/scale img (.getWidth img) (.getHeight img)))))
+  "Markdown `src` typeset `max-width` pixels wide, trimmed to what is drawn,
+   in `style` (see `html/default-style`). Text wraps to the width, so only
+   its height can be too much."
+  (^BufferedImage [src max-width] (image src max-width nil))
+  (^BufferedImage [src max-width style]
+  (let [img (html/render (html/document max-width (css (merge html/default-style style))
+                                        (->xhtml src)))]
+    (image/trim (image/scale img (.getWidth img) (.getHeight img))))))

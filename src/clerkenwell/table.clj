@@ -1,7 +1,7 @@
 (ns clerkenwell.table
   "Tables: the shapes Kindly's `kind/table` accepts, reduced to bounded rows of
-   strings, shown in Emacs as aligned text and on the page typeset in Times
-   New Roman. See docs/rich-output.md."
+   strings, shown in Emacs as aligned text and on the page typeset in the
+   prose font. See docs/rich-output.md."
   (:require [clojure.string :as str]
             [clerkenwell.html :as html]
             [clerkenwell.image :as image])
@@ -143,12 +143,11 @@
 
 ;; -------- the page: typeset --------
 
-(def font-family "Times New Roman")
-(def font-size 40)
-(def min-font-size
-  "A table too wide for the page is set smaller, down to this; it is still
-   comfortably legible on e-ink."
-  28)
+(defn- min-font-size
+  "A table too wide for the page is set smaller than `size`, down to this;
+   at the default size, 28 pixels, still comfortably legible on e-ink."
+  [size]
+  (max 1 (Math/round (* 0.7 (double size)))))
 
 (defn- html-table [{:keys [columns rows align] :as t}]
   (let [cell (fn [tag s a] (str "<" tag (when (= a :right) " class=\"r\"") ">"
@@ -161,8 +160,8 @@
          "</table>"
          (apply str (map #(str "<p>" (html/escape %) "</p>") (notes t))))))
 
-(defn- css [size {:keys [nowrap? width]}]
-  (str "body { font-family: '" font-family "', serif; font-size: " size "px; }"
+(defn- css [family size {:keys [nowrap? width]}]
+  (str "body { font-family: '" family "', serif; font-size: " size "px; }"
        "table { border-collapse: collapse;"
        (when width (str " width: " width "px;")) " }"
        "th, td { padding: 0.1em 0.5em; text-align: left; vertical-align: top;"
@@ -177,32 +176,37 @@
    and the drawn width is the table's own."
   8000)
 
-(defn- draw [t size opts]
-  (let [img (html/render (html/document canvas-width (css size opts) (html-table t)))
+(defn- draw [t family size opts]
+  (let [img (html/render (html/document canvas-width (css family size opts) (html-table t)))
         gray (image/scale img (.getWidth img) (.getHeight img))]
     (image/trim gray)))
 
 (defn image
-  "The table typeset for the page, no wider than `max-width`. A table that is
-   too wide is set in a smaller size, down to `min-font-size`; one still too
-   wide then wraps its cells between words, and only if even that cannot fit
-   is the drawing scaled down."
-  ^BufferedImage [t max-width]
-  (let [fits? (fn [^BufferedImage img] (<= (.getWidth img) max-width))
-        natural (draw t font-size {:nowrap? true})]
+  "The table typeset for the page, no wider than `max-width`, in the prose
+   font and size of `style` (see `html/default-style`). A table that is too
+   wide is set in a smaller size, down to `min-font-size`; one still too wide
+   then wraps its cells between words, and only if even that cannot fit is
+   the drawing scaled down."
+  (^BufferedImage [t max-width] (image t max-width nil))
+  (^BufferedImage [t max-width style]
+  (let [{family :prose-font font-size :font-size} (merge html/default-style style)
+        smallest (min-font-size font-size)
+        draw (fn [size opts] (draw t family size opts))
+        fits? (fn [^BufferedImage img] (<= (.getWidth img) max-width))
+        natural (draw font-size {:nowrap? true})]
     (if (fits? natural)
       natural
       ;; Width is not quite proportional to size (rounding, rules), so start
       ;; from the proportional estimate and step down until it fits.
       (let [estimate (int (* font-size (/ (double max-width) (.getWidth natural))))
-            sizes (range (max min-font-size (min estimate (dec font-size)))
-                         (dec min-font-size) -1)
-            smaller (some #(let [img (draw t % {:nowrap? true})] (when (fits? img) img))
+            sizes (range (max smallest (min estimate (dec font-size)))
+                         (dec smallest) -1)
+            smaller (some #(let [img (draw % {:nowrap? true})] (when (fits? img) img))
                           sizes)]
         (or smaller
-            (let [wrapped (draw t min-font-size {:width max-width})]
+            (let [wrapped (draw smallest {:width max-width})]
               (if (fits? wrapped)
                 wrapped
                 (let [[w h] (image/fit (.getWidth wrapped) (.getHeight wrapped)
                                        max-width Long/MAX_VALUE)]
-                  (image/scale wrapped w h)))))))))
+                  (image/scale wrapped w h))))))))))

@@ -459,10 +459,14 @@
 
    `opts` may carry `:include-source? true` to write the expression above its
    result on the tablet. Emacs records both regardless; this only controls what
-   the page receives. `:strict-height? false` lets the result run below the
-   bottom of the screen, onto the part of a scrollable page you scroll to.
-   `:notebook-id` says which notebook the submission is meant for, and is
-   refused unless the tablet has that one open."
+   the page receives. `:notebook-id` says which notebook the submission is
+   meant for, and is refused unless the tablet has that one open.
+
+   `:settings` is how the result is presented and placed, each part merged
+   over the defaults: `:style` as `html/default-style`, `:limits` as
+   `render/default-limits` and `:layout` as `placement/default-config`.
+   Emacs sends its customisations with every submission, so a change takes
+   effect with the next."
   ([source ns-name] (submit source ns-name nil))
   ([source ns-name opts]
     (let [s @connection]
@@ -512,8 +516,9 @@
                                     :ink-bottom (ink/ink-bottom nb page)
                                     :outputs-bottom (when (pos? prev-bottom) prev-bottom)
                                     :include-source? (boolean (:include-source? opts))
-                                    :config (when (contains? opts :strict-height?)
-                                              {:strict-height? (boolean (:strict-height? opts))})})]
+                                    :style (get-in opts [:settings :style])
+                                    :limits (get-in opts [:settings :limits])
+                                    :config (get-in opts [:settings :layout])})]
                (if-not (:ok? r)
                  r
                  ;; Evaluation is done and captured. Delivery happens in the

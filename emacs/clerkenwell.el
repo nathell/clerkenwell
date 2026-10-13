@@ -84,9 +84,114 @@ submission when given a prefix argument."
   "Whether a result must fit above the bottom of the screen.
 reMarkable pages can be scrolled to be taller than the screen.  When
 nil, a result that does not fit in what is left of the screen goes
-below it instead of being refused, and images are no longer shrunk to
-fit the room left."
+below it instead of being refused, as far as `clerkenwell-scroll-limit'
+screens down, and images are no longer shrunk to fit the room left."
   :type 'boolean)
+
+;; How results look and where they go on the page.  All of these are sent
+;; with every submission, so a change takes effect with the next one.
+;; Sizes are in page pixels: the page is 1404 wide and 1872 high.
+
+(defcustom clerkenwell-font "Inconsolata"
+  "Font results are written on the page in, and code within Markdown.
+An installed font family, or the name of a font file.  It should be
+monospace: values are pretty-printed to fit the page in columns, and
+monospace output is easy to tell from your handwriting."
+  :type 'string)
+
+(defcustom clerkenwell-prose-font "Times New Roman"
+  "Font Markdown and tables are typeset in on the page.
+An installed font family, or the name of a font file."
+  :type 'string)
+
+(defcustom clerkenwell-font-size 40
+  "Size of text on the page, in page pixels.
+A table too wide for the page is set smaller, down to seven tenths of
+this, before its cells are wrapped."
+  :type 'integer)
+
+(defcustom clerkenwell-side-margin 60
+  "Space kept free at the left and right edges of the page, in page pixels.
+Results start at the left margin and are no wider than the page between
+the margins."
+  :type 'integer)
+
+(defcustom clerkenwell-top-margin 60
+  "Space kept free at the top of the page, in page pixels."
+  :type 'integer)
+
+(defcustom clerkenwell-bottom-margin 20
+  "Space kept free at the bottom of the screen, in page pixels."
+  :type 'integer)
+
+(defcustom clerkenwell-gap 20
+  "Space between a result and the handwriting or result above it.
+In page pixels."
+  :type 'integer)
+
+(defcustom clerkenwell-scroll-limit 10
+  "How many screens down a result may reach, when not strict about height.
+See `clerkenwell-strict-height'.  This only keeps a single result from
+becoming an absurdly tall image."
+  :type 'integer)
+
+(defcustom clerkenwell-print-level 10
+  "How deeply nested a value is printed before elision, as `*print-level*'."
+  :type 'integer)
+
+(defcustom clerkenwell-print-length 100
+  "How many items of a collection are printed, as `*print-length*'.
+This is what lets an infinite sequence such as (range) be printed."
+  :type 'integer)
+
+(defcustom clerkenwell-max-chars 10000
+  "The most characters of printed output kept for a result."
+  :type 'integer)
+
+(defcustom clerkenwell-print-timeout 2
+  "Seconds a value may take to print, or an image to be prepared.
+Past this the result is recorded as failed to present.  Evaluation
+itself is not limited."
+  :type 'number)
+
+(defcustom clerkenwell-chart-timeout 20
+  "Seconds a chart may take to draw.
+Longer than `clerkenwell-print-timeout': drawing is slow, and the first
+chart also waits for the JIT."
+  :type 'number)
+
+(defcustom clerkenwell-table-max-rows 30
+  "The most rows of a table shown."
+  :type 'integer)
+
+(defcustom clerkenwell-table-max-columns 12
+  "The most columns of a table shown."
+  :type 'integer)
+
+(defcustom clerkenwell-table-max-cell-chars 40
+  "The most characters of a table cell shown."
+  :type 'integer)
+
+(defun clerkenwell--settings ()
+  "How results are presented and placed, as a Clojure map literal."
+  (format (concat "{:style {:font %s :prose-font %s :font-size %d}"
+                  " :limits {:print-level %d :print-length %d :max-chars %d"
+                  " :timeout-ms %d :chart-timeout-ms %d"
+                  " :max-rows %d :max-columns %d :max-cell-chars %d}"
+                  " :layout {:left-margin %d :top-margin %d :bottom-margin %d :gap %d"
+                  " :strict-height? %s :scroll-limit %d}}")
+          (clerkenwell--clj-string clerkenwell-font)
+          (clerkenwell--clj-string clerkenwell-prose-font)
+          clerkenwell-font-size
+          clerkenwell-print-level clerkenwell-print-length clerkenwell-max-chars
+          (round (* 1000 clerkenwell-print-timeout))
+          (round (* 1000 clerkenwell-chart-timeout))
+          clerkenwell-table-max-rows clerkenwell-table-max-columns
+          clerkenwell-table-max-cell-chars
+          clerkenwell-side-margin clerkenwell-top-margin clerkenwell-bottom-margin
+          clerkenwell-gap
+          (if clerkenwell-strict-height "true" "false")
+          clerkenwell-scroll-limit))
 
 (defcustom clerkenwell-ink-colors 'theme
   "Colours handwriting images are drawn in.
@@ -116,6 +221,12 @@ The page is 1404 units wide, so at 0.8 a page-wide scribble is about
 whatever this says.  Takes effect on the next refresh."
   :type 'number)
 
+(defcustom clerkenwell-ink-stroke-width 3
+  "Width of handwriting strokes in the buffer's images, in page units.
+Run `clerkenwell-redraw' after changing it, so existing entries are
+redrawn too."
+  :type 'number)
+
 (defcustom clerkenwell-ink-resolution 2
   "Image pixels per page unit that handwriting is drawn at.
 Higher is sharper when `clerkenwell-image-scale' enlarges the images, or
@@ -127,9 +238,10 @@ after changing it, so existing entries are redrawn too."
 (defun clerkenwell--render-opts ()
   "The handwriting rendering options, as a Clojure map literal."
   (let ((colors (clerkenwell--ink-colors)))
-    (format "{:stroke-color %s :background %s :resolution %s}"
+    (format "{:stroke-color %s :background %s :stroke-width %s :resolution %s}"
             (clerkenwell--clj-string (car colors))
             (clerkenwell--clj-string (cdr colors))
+            (number-to-string clerkenwell-ink-stroke-width)
             (number-to-string clerkenwell-ink-resolution))))
 
 (defcustom clerkenwell-show-images t
@@ -749,7 +861,7 @@ customised that variable the other way)."
             clerkenwell--status "evaluating…")
       (force-mode-line-update)
       (clerkenwell--eval-async
-       (format "(clerkenwell.session/submit %s %s {:notebook-id %s :include-source? %s :strict-height? %s})"
+       (format "(clerkenwell.session/submit %s %s {:notebook-id %s :include-source? %s :settings %s})"
                (clerkenwell--clj-string source)
                ;; Only for a notebook that has no namespace yet.
                (clerkenwell--clj-string (or clerkenwell--namespace
@@ -757,7 +869,7 @@ customised that variable the other way)."
                                             "user"))
                (clerkenwell--clj-string clerkenwell--notebook-id)
                (if with-source "true" "false")
-               (if clerkenwell-strict-height "true" "false"))
+               (clerkenwell--settings))
        (lambda (result err)
          (setq clerkenwell--in-flight nil)
          (cond

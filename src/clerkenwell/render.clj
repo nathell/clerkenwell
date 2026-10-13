@@ -13,6 +13,7 @@
   (:require [clojure.java.io :as io]
             [clojure.pprint :as pp]
             [clojure.string :as str]
+            [clerkenwell.html :as html]
             [clerkenwell.image :as image]
             [clerkenwell.markdown :as markdown]
             [clerkenwell.table :as table]
@@ -39,13 +40,17 @@
    :chart-width 1284
    ;; Drawing a chart can take far longer than printing a value, and the
    ;; first one also waits for the JIT.
-   :chart-timeout-ms 20000})
+   :chart-timeout-ms 20000
+   ;; How much of a table is shown: see clerkenwell.table.
+   :max-rows 30
+   :max-columns 12
+   :max-cell-chars 40})
 
 ;; Inconsolata rather than the handwriting face Edsger used: on the page,
 ;; output in a monospace font is immediately distinguishable from your own
 ;; writing, which a handwriting font deliberately is not.
-(def default-font "Inconsolata")
-(def default-font-size 40)
+(def default-font (:font html/default-style))
+(def default-font-size (:font-size html/default-style))
 
 (defn load-font
   "The font to draw output in: a font file when `font` names one that exists,
@@ -329,7 +334,10 @@
                           (cond chart? (capture-chart value chart-width)
                                 (= kind :kind/image) (capture-image value)
                                 (#{:kind/table :kind/dataset} kind)
-                                (some->> (table/table-data value) (hash-map :table))
+                                (some->> (table/table-data
+                                          value (select-keys limits [:max-rows :max-columns
+                                                                     :max-cell-chars]))
+                                         (hash-map :table))
                                 ;; Clay takes a string, or a sequence of them
                                 ;; as lines.
                                 (= kind :kind/md)
@@ -535,11 +543,15 @@
    the width, beneath its source likewise, and refused like text if too tall;
    so is Markdown.
 
+   Text is set in :font at :font-size, Markdown and tables in :prose-font;
+   see `html/default-style`.
+
    Returns {:ok? true :path :width :height} or, when the result does not fit the
    supported page area, {:ok? false :reason :insufficient-space ...}. Rather than
    squeeze it, the caller keeps the result pending."
-  [presentation out-path {:keys [max-width max-height font font-size base-dir]
-                          :or {font default-font font-size default-font-size}}]
+  [presentation out-path {:keys [max-width max-height font font-size prose-font base-dir]
+                          :or {font default-font font-size default-font-size
+                               prose-font (:prose-font html/default-style)}}]
   (let [max-width (min (or max-width page-width) page-width)
         ;; Not clamped to the screen: a scrollable page can be taller, and
         ;; the caller says how much room there is.
@@ -578,9 +590,10 @@
       ;; Typeset text: fitted to the width, but, like text, never squeezed
       ;; to the height.
       (let [src (when-let [t (:tablet-text presentation)] (text-image t opts))
+            style {:font font :prose-font prose-font :font-size font-size}
             ^BufferedImage typeset (if (= :table (:kind presentation))
-                                     (table/image presentation max-width)
-                                     (markdown/image (:markdown presentation) max-width))
+                                     (table/image presentation max-width style)
+                                     (markdown/image (:markdown presentation) max-width style))
             total (+ (above-height src) (.getHeight typeset))]
         (cond
           (:refused src) (refuse (:refused src))

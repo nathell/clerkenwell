@@ -65,3 +65,11 @@
         (is (false? (:ok? r)))
         (is (= :insufficient-space (:reason r)))))
     (.delete out)))
+
+(deftest set-as-configured
+  (let [src "A paragraph long enough to wrap, and then some more words to make sure of it."
+        small (markdown/image src 800 {:font-size 30})
+        large (markdown/image src 800 {:font-size 60})]
+    (is (> (.getHeight large) (.getHeight small)))
+    (is (re-find #"font-family: 'Georgia'" (markdown/css (merge html/default-style {:prose-font "Georgia"}))))
+    (is (re-find #"code \{ font-family: 'Menlo'" (markdown/css (merge html/default-style {:font "Menlo"}))))))
