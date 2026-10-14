@@ -386,6 +386,31 @@ separator, header and all."
     (should (equal "a\n b" (clerkenwell--dedent "\ta\n         b"))))
   (should (equal "as is" (clerkenwell--dedent "as is"))))
 
+(ert-deftest clerkenwell-test-eval-request-before-cider-2 ()
+  "CIDER before 2.0 has only the positional `cider-nrepl-request:eval'."
+  (let (sent)
+    (cl-letf (((symbol-function 'fboundp)
+               (let ((real (symbol-function 'fboundp)))
+                 (lambda (f) (and (not (eq f 'cider-nrepl-send-eval-request))
+                                  (funcall real f)))))
+              ((symbol-function 'cider-nrepl-request:eval)
+               (lambda (code _handler _ns _line _column _params connection)
+                 (setq sent (list code connection)))))
+      (clerkenwell--send-eval-request "(+ 1 2)" #'ignore 'conn))
+    (should (equal '("(+ 1 2)" conn) sent))))
+
+(ert-deftest clerkenwell-test-unsendable-request-is-not-left-in-flight ()
+  (clerkenwell-test--with-buffer
+   (setq clerkenwell--notebook-id "nb")
+   (let ((inhibit-read-only t))
+     (goto-char (point-max))
+     (insert "(+ 1 2)"))
+   (cl-letf (((symbol-function 'clerkenwell--eval-async)
+              (lambda (&rest _) (error "No nREPL"))))
+     (clerkenwell-evaluate-and-send))
+   (should-not clerkenwell--in-flight)
+   (should (equal "error" clerkenwell--status))))
+
 (ert-deftest clerkenwell-test-send-text-needs-a-connection ()
   (let ((clerkenwell--repl nil))
     (should-error (clerkenwell-send-text "hello") :type 'user-error)))

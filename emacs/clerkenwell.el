@@ -342,6 +342,15 @@ Escaping rather than interpolation: the draft is arbitrary user text."
       clerkenwell--repl
       (cider-current-repl nil 'ensure)))
 
+(defun clerkenwell--send-eval-request (code handler connection)
+  "Send CODE for evaluation on CONNECTION, passing each response to HANDLER.
+CIDER 2.0 renamed the function that does this; the older name is kept
+for the CIDER versions before it."
+  (if (fboundp 'cider-nrepl-send-eval-request)
+      (cider-nrepl-send-eval-request code handler :connection connection)
+    (with-no-warnings
+      (cider-nrepl-request:eval code handler nil nil nil nil connection))))
+
 (defun clerkenwell--eval-async (code callback)
   "Evaluate CODE in the linked REPL, calling CALLBACK with parsed EDN or nil.
 
@@ -352,7 +361,7 @@ read off the message carrying \='done\='.  CALLBACK runs exactly once."
         (result nil)
         (problem nil)
         (fired nil))
-    (cider-nrepl-send-eval-request
+    (clerkenwell--send-eval-request
      code
      (lambda (response)
        (nrepl-dbind-response response (value err ex status)
@@ -367,7 +376,7 @@ read off the message carrying \='done\='.  CALLBACK runs exactly once."
                         (condition-case nil (parseedn-read-str result)
                           (error nil)))
                       problem)))))
-     :connection (clerkenwell--connection-buffer))))
+     (clerkenwell--connection-buffer))))
 
 (defun clerkenwell--eval-sync (code)
   "Evaluate CODE in the linked REPL and return parsed EDN."
@@ -875,43 +884,51 @@ customised that variable the other way)."
       (setq clerkenwell--in-flight t
             clerkenwell--status "evaluating…")
       (force-mode-line-update)
-      (clerkenwell--eval-async
-       (format "(clerkenwell.session/submit %s %s {:notebook-id %s :include-source? %s :settings %s})"
-               (clerkenwell--clj-string source)
-               ;; Only for a notebook that has no namespace yet.
-               (clerkenwell--clj-string (or clerkenwell--namespace
-                                            clerkenwell--default-namespace
-                                            "user"))
-               (clerkenwell--clj-string clerkenwell--notebook-id)
-               (if with-source "true" "false")
-               (clerkenwell--settings))
-       (lambda (result err)
-         (setq clerkenwell--in-flight nil)
-         (cond
-          (err (setq clerkenwell--status "error")
-               (message "Clerkenwell: %s" err))
-          ((null result)
-           (setq clerkenwell--status "error")
-           (message "Clerkenwell: no result (is clerkenwell.session on the classpath?)"))
-          ((equal "lease" (clerkenwell--name (clerkenwell--get result :stage)))
-           ;; Nothing was evaluated, so submitting again is safe.
-           (setq clerkenwell--status "read-only")
-           (message "Clerkenwell: %s" (clerkenwell--get result :message)))
-          ((clerkenwell--get result :ok?)
-           ;; Only clear the draft if it is still the text we submitted.
-           (when (= revision clerkenwell--draft-revision)
-             (let ((inhibit-read-only t))
-               (delete-region (clerkenwell--draft-start) (point-max))))
-           (message "Clerkenwell: %s" (or (clerkenwell--get result :text)
-                                          "value hidden"))
-           (clerkenwell-refresh))
-          (t
-           (setq clerkenwell--status "rejected")
-           ;; A failure leaves the draft alone so it can be corrected.
-           (message "Clerkenwell [%s]: %s"
-                    (clerkenwell--get result :stage)
-                    (or (clerkenwell--get result :message)
-                        (clerkenwell--get result :reason)))))))))))
+      ;; Nothing clears the flag but the callback, so a request that
+      ;; cannot even be sent must clear it here.
+      (condition-case err
+          (clerkenwell--eval-async
+           (format "(clerkenwell.session/submit %s %s {:notebook-id %s :include-source? %s :settings %s})"
+                   (clerkenwell--clj-string source)
+                   ;; Only for a notebook that has no namespace yet.
+                   (clerkenwell--clj-string (or clerkenwell--namespace
+                                                clerkenwell--default-namespace
+                                                "user"))
+                   (clerkenwell--clj-string clerkenwell--notebook-id)
+                   (if with-source "true" "false")
+                   (clerkenwell--settings))
+           (lambda (result err)
+             (setq clerkenwell--in-flight nil)
+             (cond
+              (err (setq clerkenwell--status "error")
+                   (message "Clerkenwell: %s" err))
+              ((null result)
+               (setq clerkenwell--status "error")
+               (message "Clerkenwell: no result (is clerkenwell.session on the classpath?)"))
+              ((equal "lease" (clerkenwell--name (clerkenwell--get result :stage)))
+               ;; Nothing was evaluated, so submitting again is safe.
+               (setq clerkenwell--status "read-only")
+               (message "Clerkenwell: %s" (clerkenwell--get result :message)))
+              ((clerkenwell--get result :ok?)
+               ;; Only clear the draft if it is still the text we submitted.
+               (when (= revision clerkenwell--draft-revision)
+                 (let ((inhibit-read-only t))
+                   (delete-region (clerkenwell--draft-start) (point-max))))
+               (message "Clerkenwell: %s" (or (clerkenwell--get result :text)
+                                              "value hidden"))
+               (clerkenwell-refresh))
+              (t
+               (setq clerkenwell--status "rejected")
+               ;; A failure leaves the draft alone so it can be corrected.
+               (message "Clerkenwell [%s]: %s"
+                        (clerkenwell--get result :stage)
+                        (or (clerkenwell--get result :message)
+                            (clerkenwell--get result :reason)))))))
+        (error
+         (setq clerkenwell--in-flight nil
+               clerkenwell--status "error")
+         (force-mode-line-update)
+         (message "Clerkenwell: %s" (error-message-string err))))))))
 
 (defun clerkenwell--dedent (text &optional column)
   "TEXT with the indentation its lines share removed, and tabs expanded.
