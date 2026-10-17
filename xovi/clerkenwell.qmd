@@ -25,8 +25,8 @@
 ; Host side: bb tools/insert-harness.clj  (see its --help)
 ; Tunnel:    ssh -R 127.0.0.1:14242:127.0.0.1:14242 <rm-host-alias>
 ;
-; This file is unhashed. Distribution builds are hashed with qmldiff against
-; hashtab for firmware 3.27.1.0.
+; Published copies of this file are hashed with qmldiff against the hashtab
+; for firmware 3.27.1.0 (tools/publish).
 ;
 ; Compatible with: firmware 3.27.1.0 (snorlax).
 
