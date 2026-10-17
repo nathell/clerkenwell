@@ -1,7 +1,8 @@
 #!/bin/sh
-# Publish main with every .qmd hashed by qmldiff, so that the published
-# history never holds an unhashed adapter. The rewrite is deterministic, so
-# publishing again only adds commits, and the push never needs forcing.
+# Publish main, and the tags on it, with every .qmd hashed by qmldiff, so
+# that the published history never holds an unhashed adapter. The rewrite is
+# deterministic, so publishing again only adds commits and tags, and the push
+# never needs forcing. Tags on other branches are not published.
 #
 # Once per checkout:
 #   git config clerkenwell.public <url>         where to publish
@@ -47,7 +48,7 @@ export CKW_QMLDIFF="$QMLDIFF" CKW_HASHTAB="$HASHTAB"
 # Check every .qmd in the rewritten history. Hashing is not idempotent (it
 # pads some spaces again), but a hashed file changes only in whitespace.
 cd "$WORK/repo"
-git rev-list --objects main | while read -r blob path; do
+git rev-list --objects main --tags | while read -r blob path; do
   case "$path" in
     *.qmd)
       git cat-file blob "$blob" > "$WORK/check.qmd"
@@ -59,4 +60,4 @@ git rev-list --objects main | while read -r blob path; do
   esac
 done
 
-git push "$URL" main
+git push "$URL" main --tags
