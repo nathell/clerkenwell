@@ -12,7 +12,7 @@ In addition to Clojure data, Clerkenwell supports multiple types of output (disc
 
 ## Demo
 
-Insert demo video...
+https://github.com/user-attachments/assets/0a99ec4c-0bc1-448e-81d6-310ab3d10385
 
 ## Running it
 
