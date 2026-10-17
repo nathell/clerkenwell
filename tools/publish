@@ -1,0 +1,62 @@
+#!/bin/sh
+# Publish main with every .qmd hashed by qmldiff, so that the published
+# history never holds an unhashed adapter. The rewrite is deterministic, so
+# publishing again only adds commits, and the push never needs forcing.
+#
+# Once per checkout:
+#   git config clerkenwell.public <url>         where to publish
+#   git config clerkenwell.hashtab <path>       the device's hashtab, from
+#       rm:xovi/exthome/qt-resource-rebuilder/hashtab; never commit it
+#   git config clerkenwell.qmldiff <path>       if qmldiff is not on PATH
+#
+# Usage: tools/publish [url]     url overrides clerkenwell.public
+set -e
+cd "$(dirname "$0")/.."
+
+URL="${1:-$(git config clerkenwell.public || true)}"
+HASHTAB="$(git config clerkenwell.hashtab || true)"
+QMLDIFF="$(git config clerkenwell.qmldiff || echo qmldiff)"
+[ -n "$URL" ] || { echo "publish: set clerkenwell.public, or pass a url" >&2; exit 1; }
+[ -f "$HASHTAB" ] || { echo "publish: no hashtab; set clerkenwell.hashtab" >&2; exit 1; }
+command -v "$QMLDIFF" >/dev/null || { echo "publish: no qmldiff; set clerkenwell.qmldiff" >&2; exit 1; }
+command -v git-filter-repo >/dev/null || { echo "publish: git-filter-repo is not on PATH" >&2; exit 1; }
+
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+git clone --quiet --no-local --single-branch --branch main . "$WORK/repo"
+
+export CKW_QMLDIFF="$QMLDIFF" CKW_HASHTAB="$HASHTAB"
+(cd "$WORK/repo" && git filter-repo --quiet --file-info-callback '
+  if not filename.endswith(b".qmd"):
+    return (filename, mode, blob_id)
+  import os, subprocess, tempfile
+  contents = value.get_contents_by_identifier(blob_id)
+  with tempfile.TemporaryDirectory() as d:
+    path = os.path.join(d, "adapter.qmd")
+    with open(path, "wb") as f:
+      f.write(contents)
+    subprocess.run([os.environ["CKW_QMLDIFF"], "hash-diffs",
+                    os.environ["CKW_HASHTAB"], path], check=True)
+    with open(path, "rb") as f:
+      hashed = f.read()
+  if hashed == contents:
+    raise SystemExit("publish: qmldiff left %s unchanged" % filename.decode())
+  return (filename, mode, value.insert_file_with_contents(hashed))
+')
+
+# Check every .qmd in the rewritten history. Hashing is not idempotent (it
+# pads some spaces again), but a hashed file changes only in whitespace.
+cd "$WORK/repo"
+git rev-list --objects main | while read -r blob path; do
+  case "$path" in
+    *.qmd)
+      git cat-file blob "$blob" > "$WORK/check.qmd"
+      cp "$WORK/check.qmd" "$WORK/rehashed.qmd"
+      "$QMLDIFF" hash-diffs "$HASHTAB" "$WORK/rehashed.qmd"
+      diff -bq "$WORK/check.qmd" "$WORK/rehashed.qmd" >/dev/null ||
+        { echo "publish: $path ($blob) is not hashed; nothing pushed" >&2; exit 1; }
+      ;;
+  esac
+done
+
+git push "$URL" main
