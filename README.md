@@ -14,6 +14,12 @@ In addition to Clojure data, Clerkenwell supports multiple types of output (disc
 
 https://github.com/user-attachments/assets/0a99ec4c-0bc1-448e-81d6-310ab3d10385
 
+## Releases
+
+The current version is 0.1.0.
+
+Clerkenwell is currently not being released via Clojars or any other Maven repository; it is meant to be accessed through a local clone.
+
 ## Running it
 
 Refer to separate documents about [setup](docs/setup.md) and [using Clerkenwell](docs/using.md).
