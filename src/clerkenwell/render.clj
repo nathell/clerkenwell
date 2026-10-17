@@ -46,7 +46,7 @@
    :max-columns 12
    :max-cell-chars 40})
 
-;; Inconsolata rather than the handwriting face Edsger used: on the page,
+;; Monospace rather than the handwriting face Edsger used: on the page,
 ;; output in a monospace font is immediately distinguishable from your own
 ;; writing, which a handwriting font deliberately is not.
 (def default-font (:font html/default-style))

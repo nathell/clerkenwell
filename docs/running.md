@@ -29,8 +29,8 @@ than in your CIDER session.
   port, so the next `ssh -R` cannot bind it; and a multiplexed session cannot
   add a remote forward at all. Step 2 opts out explicitly.
 
-- A JVM on the host, and the Inconsolata font installed. Output is drawn in a
-  monospace face so that on the page it is immediately distinguishable from your
+- A JVM on the host. Output is drawn in a monospace face, the one Emacs uses
+  by default, so that on the page it is immediately distinguishable from your
   own writing. Images are drawn with Java2D, so no external image tool is
   needed. To use another font, or one that is not installed, set
   `clerkenwell-font` to its family or the path of a `.ttf` file (see

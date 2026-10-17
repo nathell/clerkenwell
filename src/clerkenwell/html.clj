@@ -13,9 +13,11 @@
 (def default-style
   "How output is set on the page: :font for printed values and code, which
    should be monospace; :prose-font for Markdown and tables; :font-size, in
-   page pixels, for both. A font is an installed family or a font file."
-  {:font "Inconsolata"
-   :prose-font "Times New Roman"
+   page pixels, for both. A font is an installed family or a font file.
+   The defaults are Java's logical fonts, which every JVM has; Emacs sends
+   its own font in place of Monospaced."
+  {:font "Monospaced"
+   :prose-font "Serif"
    :font-size 40})
 
 ;; It logs every stage of every render at INFO, which would flood the REPL.

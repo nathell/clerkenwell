@@ -2,7 +2,9 @@
   (:require [clojure.java.io :as io]
             [clojure.test :refer [deftest is testing]]
             [clerkenwell.core :as core]
+            [clerkenwell.html :as html]
             [clerkenwell.placement :as placement]
+            [clerkenwell.render :as render]
             [clerkenwell.store :as store]))
 
 (defn- tmp-root []
@@ -88,10 +90,14 @@
         r (core/submit! {:state-root root :notebook-id "nb-1" :page-id "page-1"
                          :source "(vec (range 1000 1080))"
                          :namespace "user" :ink-bottom nil :outputs-bottom nil})
-        lines (clojure.string/split-lines (get-in r [:presentation :text]))]
+        lines (clojure.string/split-lines (get-in r [:presentation :text]))
+        width (render/columns (- (:page-width placement/default-config)
+                                 (* 2 (:left-margin placement/default-config)))
+                              (:font html/default-style) (:font-size html/default-style))]
     (is (:ok? r))
     (is (> (count lines) 1))
-    (is (< 50 (apply max (map count lines)) 65)
+    ;; Each element takes five columns, so a full line is within five of the width.
+    (is (< (- width 6) (apply max (map count lines)) (inc width))
         "wrapped to what fits the usable page width, not pprint's default 72")))
 
 (deftest an-image-is-kept-and-drawn

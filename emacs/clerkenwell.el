@@ -110,9 +110,11 @@ own, as on a terminal, Java's Monospaced, which every JVM has."
                (and family (format "%s" family)))))
       "Monospaced"))
 
-(defcustom clerkenwell-prose-font "Times New Roman"
+(defcustom clerkenwell-prose-font "Serif"
   "Font Markdown and tables are typeset in on the page.
-An installed font family, or the name of a font file."
+An installed font family, or the name of a font file.  The default,
+Serif, is Java's own serif face, which every JVM has.  A family that is
+not installed falls back to it silently, rather than being refused."
   :type 'string)
 
 (defcustom clerkenwell-font-size 40

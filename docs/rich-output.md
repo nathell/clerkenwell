@@ -150,7 +150,7 @@ At most 30 rows and 12 columns are shown, each cell capped at 40 characters,
 with what was left out said beneath ("… 70 more rows"). A column of numbers
 aligns right. Headings drop a plain keyword's colon.
 
-On the page, tables are set in the prose font, Times New Roman by default
+On the page, tables are set in the prose font, Java's Serif by default
 (`clerkenwell-prose-font`), a proportional face whose digits are all one
 width, so numbers still line up. A table too wide for the page is set
 smaller, down to seven tenths of the font size; one still too wide wraps its
@@ -164,7 +164,7 @@ shows the same rows and columns as an Org-style text table.
 text. nextjournal/markdown (commonmark-java underneath, with GFM tables,
 strikethrough, task lists, footnotes and autolinks) parses it into hiccup,
 which Clerkenwell serialises as XHTML. Body text is set in the prose font,
-code in the output font (Times New Roman and Inconsolata by default); code
+code in the output font (by default Java's Serif, and the font Emacs uses); code
 blocks wrap rather than being cut off at the edge.
 
 Nothing is fetched while drawing: an image is shown as its alt text in
