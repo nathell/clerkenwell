@@ -4,7 +4,7 @@ An e-paper notebook for thinking with Clojure.
 
 ## What it does
 
-Clerkenwell gives you a two-way binding between your paper tablet and a Clojure REPL in Emacs. Anything you write on tablet is automatically reflected in Emacs, and you can evaluate expressions from the REPL and view results on the tablet.
+Clerkenwell gives you a two-way binding between your paper tablet and a Clojure ([CIDER]) REPL in Emacs. Anything you write on tablet is automatically reflected in Emacs, and you can evaluate expressions from the REPL and view results on the tablet.
 
 Clerkenwell is a computational notebook, like [Jupyter], [Clerk] or [Clay]; except the thinking / textual part happens on e-paper rather than on the computer. You are free to mix and match REPL output and handwriting. Doodle over the output!
 
@@ -38,7 +38,7 @@ Human review status: **Casually screened.** (I can confirm the code isn't malici
 
 Full human review is ongoing. I intend to weed out LLM-isms and simplify the code so that it's easier to read and contribute to for humans.
 
-This README was written by a human.
+This README, as well as the documentation, was written by a human.
 
 ## Steward
 
@@ -63,6 +63,7 @@ Copyright (c) 2026 Daniel Janus.
 Portions based on [rmscene], copyright (c) 2023 Rick Lupton (under the same MIT license).
 
  [Jupyter]: https://jupyter.org/
+ [CIDER]: https://cider.mx
  [Clerk]: https://clerk.vision/
  [Clay]: https://scicloj.github.io/clay/
  [Kindly]: https://github.com/scicloj/kindly
