@@ -48,7 +48,7 @@ This README, as well as the documentation, was written by a human.
 
 ## Steward
 
-The person responsible for indeed (the equivalent of “author” for human-written projects, overseeing LLMs and verifying their output) is [Daniel Janus].
+The person responsible for Clerkenwell (the equivalent of “author” for human-written projects, overseeing LLMs and verifying their output) is [Daniel Janus].
 
 ## See also
 
